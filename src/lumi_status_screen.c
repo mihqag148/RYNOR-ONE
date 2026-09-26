@@ -204,9 +204,10 @@ static uint32_t rgb_last_activity_ms;
 static uint32_t saver_delay_ms = 60000U;
 static uint32_t sleep_delay_ms = 120000U;
 static uint32_t deep_sleep_delay_ms = 900000U;
+static uint32_t hibernate_delay_ms = 0U;
 static uint32_t rgb_idle_delay_ms = 60000U;
 static bool rgb_idle_suspended;
-static bool deep_sleep_pending;
+static bool deep_sleep_active;
 static bool saver_enabled = true;
 static uint8_t saver_style = LUMI_SAVER_OFF;
 static uint32_t wallpaper_color_a = 0x000000;
@@ -3218,7 +3219,7 @@ static void lumi_ui_note_activity_internal(bool physical_key) {
 
     k_mutex_lock(&lumi_ui_config_lock, K_FOREVER);
     ui_last_activity_ms = now;
-    deep_sleep_pending = false;
+    deep_sleep_active = false;
 
     /* RGB uses its own idle timeout, but it shares the same explicit wake
      * sources as the display: physical input, Auto Profile changes, and
@@ -3345,14 +3346,33 @@ void lumi_ui_set_sleep_timeout(uint32_t seconds) {
 }
 
 void lumi_ui_set_deep_sleep_timeout(uint32_t seconds) {
-    /* Zero means Never. Limit the configurable range to seven days so the
-     * seconds-to-milliseconds conversion cannot overflow uint32_t.
+    /* Deep sleep stays in nRF52840 System ON so BLE remains connected.
+     * Zero means Never. Limit the configurable range to seven days.
      */
     uint32_t clamped = MIN(seconds, 604800U);
 
     k_mutex_lock(&lumi_ui_config_lock, K_FOREVER);
     deep_sleep_delay_ms = clamped * 1000U;
-    deep_sleep_pending = false;
+
+    /* If the threshold is moved into the future while already deep sleeping,
+     * return to normal soft-sleep state without waking the display.
+     */
+    if (clamped == 0U ||
+        (uint32_t)(k_uptime_get_32() - ui_last_activity_ms) <
+            deep_sleep_delay_ms) {
+        deep_sleep_active = false;
+    }
+    k_mutex_unlock(&lumi_ui_config_lock);
+}
+
+void lumi_ui_set_hibernate_timeout(uint32_t seconds) {
+    /* Hibernate is the old System OFF path: lowest current, BLE disconnects,
+     * and wake is a cold boot. Keep it disabled by default.
+     */
+    uint32_t clamped = MIN(seconds, 604800U);
+
+    k_mutex_lock(&lumi_ui_config_lock, K_FOREVER);
+    hibernate_delay_ms = clamped * 1000U;
     k_mutex_unlock(&lumi_ui_config_lock);
 }
 
@@ -3361,6 +3381,16 @@ bool lumi_ui_is_soft_sleeping(void) {
 
     k_mutex_lock(&lumi_ui_config_lock, K_FOREVER);
     sleeping = soft_sleep;
+    k_mutex_unlock(&lumi_ui_config_lock);
+
+    return sleeping;
+}
+
+bool lumi_ui_is_deep_sleeping(void) {
+    bool sleeping;
+
+    k_mutex_lock(&lumi_ui_config_lock, K_FOREVER);
+    sleeping = deep_sleep_active;
     k_mutex_unlock(&lumi_ui_config_lock);
 
     return sleeping;
@@ -3425,22 +3455,24 @@ static void lumi_sleep_work_handler(struct k_work *work) {
 
     uint32_t soft_timeout;
     uint32_t deep_timeout;
+    uint32_t hibernate_timeout;
     uint32_t rgb_timeout;
     uint32_t last_activity;
     uint32_t last_rgb_activity;
     bool already_sleeping;
+    bool already_deep;
     bool rgb_timed_out;
-    bool deep_pending;
 
     k_mutex_lock(&lumi_ui_config_lock, K_FOREVER);
     soft_timeout = sleep_delay_ms;
     deep_timeout = deep_sleep_delay_ms;
+    hibernate_timeout = hibernate_delay_ms;
     rgb_timeout = rgb_idle_delay_ms;
     last_activity = ui_last_activity_ms;
     last_rgb_activity = rgb_last_activity_ms;
     already_sleeping = soft_sleep;
+    already_deep = deep_sleep_active;
     rgb_timed_out = rgb_idle_suspended;
-    deep_pending = deep_sleep_pending;
     k_mutex_unlock(&lumi_ui_config_lock);
 
     uint32_t now = k_uptime_get_32();
@@ -3462,7 +3494,9 @@ static void lumi_sleep_work_handler(struct k_work *work) {
         rgb_timed_out = true;
     }
 
-    /* Soft sleep keeps BLE HID available but stops all screen/RGB work. */
+    /* Stage 1: soft sleep. BLE HID remains connected, while panel/RGB and
+     * display work are stopped.
+     */
     if (soft_timeout > 0U &&
         !already_sleeping &&
         idle_ms >= soft_timeout) {
@@ -3480,24 +3514,56 @@ static void lumi_sleep_work_handler(struct k_work *work) {
         already_sleeping = true;
     }
 
-    /* True deep sleep is a full hardware power-down path. ZMK soft-off
-     * suspends devices, disables nice!nano external VCC through ext-power,
-     * arms the declared wake sources, then enters nRF52840 System OFF.
+    /* Stage 2: connected deep sleep. Do NOT call zmk_pm_soft_off(). Zephyr
+     * naturally idles the nRF52840 in System ON between BLE/GPIO events, so
+     * the BLE connection survives and a key/encoder event resumes immediately.
+     *
+     * Panel/RGB are already in their lowest practical connected state from
+     * soft sleep. Marking DEEP lets LumiPad reduce GATT polling even further.
      */
     if (deep_timeout > 0U &&
-        !deep_pending &&
-        !lumi_usb_power_present() &&
+        !already_deep &&
         idle_ms >= deep_timeout) {
 
         k_mutex_lock(&lumi_ui_config_lock, K_FOREVER);
-        deep_sleep_pending = true;
         soft_sleep = true;
+        deep_sleep_active = true;
         k_mutex_unlock(&lumi_ui_config_lock);
 
         lumi_diag_report(
             'I',
-            "Entering deep sleep timeout=%us",
+            "Entering connected deep sleep timeout=%us",
             (unsigned int)(deep_timeout / 1000U));
+
+        lumi_rgb_set_suspended(true);
+
+        if (!already_sleeping) {
+            k_work_submit_to_queue(
+                zmk_display_work_q(),
+                &lumi_panel_sleep_work);
+            already_sleeping = true;
+        }
+
+        already_deep = true;
+    }
+
+    /* Stage 3: optional Hibernate. This is the previous deep-sleep behavior:
+     * devices are suspended and the nRF52840 enters System OFF. Bluetooth is
+     * intentionally lost and wake performs a cold boot. Default is Never.
+     */
+    if (hibernate_timeout > 0U &&
+        !lumi_usb_power_present() &&
+        idle_ms >= hibernate_timeout) {
+
+        k_mutex_lock(&lumi_ui_config_lock, K_FOREVER);
+        soft_sleep = true;
+        deep_sleep_active = true;
+        k_mutex_unlock(&lumi_ui_config_lock);
+
+        lumi_diag_report(
+            'I',
+            "Entering hibernate timeout=%us",
+            (unsigned int)(hibernate_timeout / 1000U));
 
         lumi_rgb_set_suspended(true);
 
@@ -3513,31 +3579,42 @@ static void lumi_sleep_work_handler(struct k_work *work) {
         if (lumi_panel_deep_sleep_rc < 0) {
             lumi_diag_report(
                 'E',
-                "Deep sleep panel shutdown failed rc=%d",
+                "Hibernate panel shutdown failed rc=%d",
                 lumi_panel_deep_sleep_rc);
         }
 
         int rc = zmk_pm_soft_off();
         if (rc < 0) {
-            lumi_diag_report('E', "Deep sleep soft-off failed rc=%d", rc);
-
-            k_mutex_lock(&lumi_ui_config_lock, K_FOREVER);
-            deep_sleep_pending = false;
-            k_mutex_unlock(&lumi_ui_config_lock);
+            lumi_diag_report(
+                'E',
+                "Hibernate soft-off failed rc=%d",
+                rc);
         }
     }
 
-    /* While sleeping, avoid waking the CPU every five seconds. Check at most
-     * every 30 s for USB/power-state changes, or exactly when the configured
-     * deep-sleep deadline is closer.
+    /* Awake checks stay responsive. Soft sleep checks every 30 s. Connected
+     * deep sleep wakes this maintenance work only every 5 min unless a pending
+     * Hibernate deadline is closer. Physical GPIO/encoder wake does not wait
+     * for this timer; its ZMK event calls lumi_ui_note_key_activity directly.
      */
-    uint32_t next_ms = already_sleeping ? 30000U : 1000U;
+    uint32_t next_ms =
+        already_deep
+            ? 300000U
+            : (already_sleeping ? 30000U : 1000U);
 
     if (deep_timeout > 0U &&
-        !deep_pending &&
-        !lumi_usb_power_present() &&
+        !already_deep &&
         idle_ms < deep_timeout) {
         uint32_t remaining = deep_timeout - idle_ms;
+        if (remaining < next_ms) {
+            next_ms = MAX(remaining, 250U);
+        }
+    }
+
+    if (hibernate_timeout > 0U &&
+        !lumi_usb_power_present() &&
+        idle_ms < hibernate_timeout) {
+        uint32_t remaining = hibernate_timeout - idle_ms;
         if (remaining < next_ms) {
             next_ms = MAX(remaining, 250U);
         }
