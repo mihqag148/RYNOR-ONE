@@ -31,7 +31,7 @@ LOG_MODULE_REGISTER(lumi_app, CONFIG_ZMK_LOG_LEVEL);
 #define APP_UART_NODE DT_NODELABEL(lumi_app_uart)
 #define LINE_MAX 1200
 #define BITMAP_TMP_MAX LUMI_TITLE_BITMAP_MAX_BYTES
-#define LUMIPAD_HELLO_BASE "LUMIPAD|6|FW=" LUMI_FIRMWARE_VERSION
+#define LUMIPAD_HELLO_BASE "LUMIPAD|7|FW=" LUMI_FIRMWARE_VERSION
 #define KEYMAP_AUTOSAVE_INTERVAL_MS 1000
 #define LUMI_PROFILE_COUNT 10
 
@@ -198,7 +198,7 @@ static void handle_diag_log(char *save, bool from_usb) {
 
 static void handle_caps(bool from_usb) {
     const char *response =
-        "CAPS|6|MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST";
+        "CAPS|7|MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,HIBERNATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST";
 
     if (from_usb) {
         write_text_usb(response);
@@ -477,8 +477,21 @@ static void handle_cfg(char *save) {
         char *seconds = strtok_r(NULL, "|", &save);
         if (seconds) {
             uint32_t value = (uint32_t)strtoul(seconds, NULL, 10);
-            lumi_diag_report('I', "Deep sleep timeout=%us", (unsigned int)value);
+            lumi_diag_report(
+                'I',
+                "Connected deep sleep timeout=%us",
+                (unsigned int)value);
             lumi_ui_set_deep_sleep_timeout(value);
+        }
+    } else if (strcmp(cmd, "HIBERNATE") == 0) {
+        char *seconds = strtok_r(NULL, "|", &save);
+        if (seconds) {
+            uint32_t value = (uint32_t)strtoul(seconds, NULL, 10);
+            lumi_diag_report(
+                'I',
+                "Hibernate timeout=%us",
+                (unsigned int)value);
+            lumi_ui_set_hibernate_timeout(value);
         }
     } else if (strcmp(cmd, "PROFILE") == 0) {
         char *profile_s = strtok_r(NULL, "|", &save);
@@ -1294,9 +1307,11 @@ static void handle_saver_state(bool from_usb) {
 
 static void handle_power_state(bool from_usb) {
     const char *response =
-        lumi_ui_is_soft_sleeping()
-            ? "POWER|SLEEP"
-            : "POWER|AWAKE";
+        lumi_ui_is_deep_sleeping()
+            ? "POWER|DEEP"
+            : (lumi_ui_is_soft_sleeping()
+                   ? "POWER|SLEEP"
+                   : "POWER|AWAKE");
 
     if (from_usb) {
         write_text_usb(response);
@@ -1314,7 +1329,7 @@ static void handle_line(char *line, bool from_usb) {
     if (strcmp(root, "HELLO") == 0) {
         if (from_usb) {
             write_text_usb(
-                LUMIPAD_HELLO_BASE "|CAPS=MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST\r\n");
+                LUMIPAD_HELLO_BASE "|CAPS=MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,HIBERNATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST\r\n");
         }
     } else if (strcmp(root, "CAPS") == 0) {
         handle_caps(from_usb);
