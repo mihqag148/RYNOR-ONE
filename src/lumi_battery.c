@@ -209,7 +209,9 @@ static void schedule_persist_if_needed(uint8_t percent) {
             LUMI_BATTERY_SAVE_MIN_DELTA) {
         (void)k_work_reschedule(
             &lumi_battery_save_work,
-            K_SECONDS(30));
+            last_saved_percent == 0xFFU
+                ? K_SECONDS(5)
+                : K_SECONDS(30));
     }
 #else
     ARG_UNUSED(percent);
