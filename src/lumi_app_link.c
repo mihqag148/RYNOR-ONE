@@ -20,6 +20,7 @@
 #include <zmk/battery.h>
 
 #include "lumi_app_link.h"
+#include "lumi_battery.h"
 #include "lumi_now_playing.h"
 #include "lumi_rgb.h"
 #include "lumi_ui_config.h"
@@ -1214,7 +1215,7 @@ static void handle_pc_monitor(char *save) {
 
 static void handle_battery(bool from_usb) {
     char response[24];
-    uint8_t percent = zmk_battery_state_of_charge();
+    uint8_t percent = lumi_battery_percent();
 
     snprintf(
         response,
