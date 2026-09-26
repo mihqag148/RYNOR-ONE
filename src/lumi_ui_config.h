@@ -28,7 +28,9 @@ void lumi_ui_set_screensaver(bool enabled, uint8_t style,
                              uint8_t r2, uint8_t g2, uint8_t b2);
 void lumi_ui_set_sleep_timeout(uint32_t seconds);
 void lumi_ui_set_deep_sleep_timeout(uint32_t seconds);
+void lumi_ui_set_hibernate_timeout(uint32_t seconds);
 bool lumi_ui_is_soft_sleeping(void);
+bool lumi_ui_is_deep_sleeping(void);
 void lumi_ui_set_rgb_idle_timeout(uint32_t seconds);
 void lumi_ui_sleep_now(void);
 void lumi_ui_wake_now(void);
