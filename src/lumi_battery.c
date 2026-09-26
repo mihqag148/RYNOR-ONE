@@ -13,6 +13,8 @@
 #include <zephyr/sys/util.h>
 
 #include <zmk/battery.h>
+#include <zmk/event_manager.h>
+#include <zmk/events/battery_state_changed.h>
 #include <zmk/usb.h>
 
 #include "lumi_battery.h"
@@ -360,6 +362,29 @@ static void lumi_battery_bas_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
     publish_bas_level(lumi_battery_percent());
 }
+
+static int lumi_battery_raw_event_listener(const zmk_event_t *eh) {
+    if (!as_zmk_battery_state_changed(eh)) {
+        return -ENOTSUP;
+    }
+
+    /* ZMK writes its raw single-sample value to BAS after raising the battery
+     * event. Re-apply the filtered RYNOR value just after that update so the
+     * Windows battery indicator matches the device screen and LumiPad.
+     */
+    (void)k_work_reschedule(
+        &lumi_battery_bas_work,
+        K_MSEC(100));
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(
+    lumi_battery_raw,
+    lumi_battery_raw_event_listener);
+ZMK_SUBSCRIPTION(
+    lumi_battery_raw,
+    zmk_battery_state_changed);
 
 #if IS_ENABLED(CONFIG_SETTINGS)
 static int lumi_battery_settings_set(
