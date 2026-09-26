@@ -204,9 +204,14 @@ static void publish_bas_level(uint8_t percent) {
 
 static void schedule_persist_if_needed(uint8_t percent) {
 #if IS_ENABLED(CONFIG_SETTINGS)
+    int delta =
+        (int)percent - (int)last_saved_percent;
+    if (delta < 0) {
+        delta = -delta;
+    }
+
     if (last_saved_percent == 0xFFU ||
-        ABS((int)percent - (int)last_saved_percent) >=
-            LUMI_BATTERY_SAVE_MIN_DELTA) {
+        delta >= LUMI_BATTERY_SAVE_MIN_DELTA) {
         (void)k_work_reschedule(
             &lumi_battery_save_work,
             last_saved_percent == 0xFFU
