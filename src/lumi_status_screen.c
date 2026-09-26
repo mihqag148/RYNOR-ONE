@@ -20,7 +20,6 @@
 #include <zmk/ble.h>
 #include <zmk/display.h>
 #include <zmk/display/status_screen.h>
-#include <zmk/display/widgets/battery_status.h>
 #include <zmk/endpoints.h>
 #include <zmk/event_manager.h>
 #include <zmk/events/ble_active_profile_changed.h>
@@ -33,6 +32,7 @@
 #include <zmk/pm.h>
 #include <zmk/usb.h>
 #include "lumi_panel.h"
+#include "lumi_battery.h"
 #include "lumi_now_playing.h"
 #include "lumi_rgb.h"
 #include "lumi_ui_config.h"
@@ -46,8 +46,7 @@
 #define PRESS_MIN_MS 100
 
 static lv_obj_t *tiles[KEY_COUNT], *icons[KEY_COUNT], *captions[KEY_COUNT];
-static lv_obj_t *layer_label, *output_label;
-static struct zmk_widget_battery_status battery_widget;
+static lv_obj_t *layer_label, *output_label, *battery_label;
 static atomic_t held_keys, tapped_keys;
 static atomic_t popup_action;
 
@@ -689,6 +688,8 @@ struct page_state {
     zmk_keymap_layer_id_t id;
     char name[32];
     struct key_caption keys[KEY_COUNT];
+    uint8_t battery_percent;
+    bool battery_ready;
 };
 
 /* Dedicated navigation icons. Use only LVGL built-in symbols so these render
@@ -1060,6 +1061,9 @@ static bool describe_profile_behavior(
 static struct page_state read_page(const zmk_event_t *eh) {
     ARG_UNUSED(eh);
     struct page_state state = {0};
+    state.battery_percent = lumi_battery_percent();
+    state.battery_ready = lumi_battery_ready();
+
     zmk_keymap_layer_index_t index = zmk_keymap_highest_layer_active();
     state.id = zmk_keymap_layer_index_to_id(index);
     const char *name = zmk_keymap_layer_name(state.id);
@@ -1179,7 +1183,9 @@ static void update_page(struct page_state state) {
     static struct page_state previous;
     static bool have_previous;
     bool same = have_previous && previous.id == state.id &&
-                strcmp(previous.name, state.name) == 0;
+                strcmp(previous.name, state.name) == 0 &&
+                previous.battery_percent == state.battery_percent &&
+                previous.battery_ready == state.battery_ready;
     for (uint8_t i = 0; same && i < KEY_COUNT; i++) {
         same = previous.keys[i].icon == state.keys[i].icon &&
                previous.keys[i].color == state.keys[i].color &&
@@ -1198,6 +1204,21 @@ static void update_page(struct page_state state) {
     accent = lv_color_hex(colors[state.id % ARRAY_SIZE(colors)]);
     lv_label_set_text(layer_label, state.name);
     lv_obj_set_style_text_color(layer_label, accent, 0);
+
+    if (battery_label) {
+        char battery_text[12];
+        if (state.battery_ready) {
+            snprintf(
+                battery_text,
+                sizeof(battery_text),
+                "%u%%",
+                (unsigned int)state.battery_percent);
+        } else {
+            snprintf(battery_text, sizeof(battery_text), "--%%");
+        }
+        lv_label_set_text(battery_label, battery_text);
+    }
+
     for (uint8_t i = 0; i < KEY_COUNT; i++) {
         lv_label_set_text(captions[i], state.keys[i].text);
         lv_label_set_text(icons[i], state.keys[i].icon);
@@ -4085,49 +4106,58 @@ lv_obj_set_width(
 lumi_output_init();
 
 
-/* Battery */
+/* Battery: use RYNOR's filtered/persisted estimator instead of the
+ * raw ZMK single-sample VDDH percentage so reboot/load transients never make
+ * the status bar jump by large amounts.
+ */
 
-zmk_widget_battery_status_init(
-    &battery_widget,
-    screen
+battery_label = lv_label_create(screen);
+lv_label_set_text(
+    battery_label,
+    lumi_battery_ready() ? "0%" : "--%"
 );
 
-lv_obj_t *battery =
-    zmk_widget_battery_status_obj(
-        &battery_widget
-    );
+if (lumi_battery_ready()) {
+    char battery_text[12];
+    snprintf(
+        battery_text,
+        sizeof(battery_text),
+        "%u%%",
+        (unsigned int)lumi_battery_percent());
+    lv_label_set_text(battery_label, battery_text);
+}
 
 lv_obj_set_style_text_font(
-    battery,
+    battery_label,
     &lv_font_montserrat_14,
     0
 );
 
 lv_obj_set_style_text_letter_space(
-    battery,
+    battery_label,
     1,
     0
 );
 
 lv_obj_set_style_text_color(
-    battery,
+    battery_label,
     lv_color_white(),
     0
 );
 
 lv_obj_set_width(
-    battery,
+    battery_label,
     82
 );
 
 lv_obj_set_style_text_align(
-    battery,
+    battery_label,
     LV_TEXT_ALIGN_RIGHT,
     0
 );
 
 lv_obj_set_pos(
-    battery,
+    battery_label,
     226,
     6
 );
