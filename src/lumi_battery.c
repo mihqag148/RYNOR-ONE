@@ -7,7 +7,6 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/sensor.h>
-#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/util.h>
@@ -79,17 +78,12 @@ K_MUTEX_DEFINE(lumi_battery_lock);
 static uint8_t stable_percent;
 static uint16_t filtered_mv;
 static bool stable_ready;
-static bool loaded_from_settings;
 static uint8_t last_saved_percent = 0xFFU;
 static uint32_t last_percent_change_ms;
 
-static void lumi_battery_measure_work_handler(struct k_work *work);
 static void lumi_battery_save_work_handler(struct k_work *work);
 static void lumi_battery_bas_work_handler(struct k_work *work);
 
-K_WORK_DELAYABLE_DEFINE(
-    lumi_battery_measure_work,
-    lumi_battery_measure_work_handler);
 K_WORK_DELAYABLE_DEFINE(
     lumi_battery_save_work,
     lumi_battery_save_work_handler);
@@ -298,32 +292,42 @@ static void update_stable_estimate(uint16_t measured_mv) {
     }
 }
 
-static void lumi_battery_measure_work_handler(struct k_work *work) {
-    ARG_UNUSED(work);
+static void lumi_battery_thread(void) {
+    for (;;) {
+        if (lumi_ui_is_soft_sleeping()) {
+            /* Keep the estimator dormant during Sleep/Deep Sleep so battery
+             * smoothing does not become another periodic wake source.
+             */
+            k_sleep(K_MSEC(LUMI_BATTERY_SLEEP_PERIOD_MS));
+            continue;
+        }
 
-    if (lumi_ui_is_soft_sleeping()) {
-        (void)k_work_reschedule(
-            &lumi_battery_measure_work,
-            K_MSEC(LUMI_BATTERY_SLEEP_PERIOD_MS));
-        return;
+        uint16_t measured_mv = 0U;
+        int rc = read_trimmed_battery_mv(&measured_mv);
+
+        if (rc == 0) {
+            update_stable_estimate(measured_mv);
+        } else {
+            lumi_diag_report(
+                'W',
+                "Battery filtered sample failed rc=%d",
+                rc);
+        }
+
+        k_sleep(K_MSEC(LUMI_BATTERY_AWAKE_PERIOD_MS));
     }
-
-    uint16_t measured_mv = 0U;
-    int rc = read_trimmed_battery_mv(&measured_mv);
-
-    if (rc == 0) {
-        update_stable_estimate(measured_mv);
-    } else {
-        lumi_diag_report(
-            'W',
-            "Battery filtered sample failed rc=%d",
-            rc);
-    }
-
-    (void)k_work_reschedule(
-        &lumi_battery_measure_work,
-        K_MSEC(LUMI_BATTERY_AWAKE_PERIOD_MS));
 }
+
+K_THREAD_DEFINE(
+    lumi_battery_thread_id,
+    1024,
+    lumi_battery_thread,
+    NULL,
+    NULL,
+    NULL,
+    K_LOWEST_APPLICATION_THREAD_PRIO,
+    0,
+    LUMI_BATTERY_BOOT_DELAY_MS);
 
 static void lumi_battery_save_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
@@ -419,7 +423,6 @@ static int lumi_battery_settings_set(
     stable_percent = state.percent;
     filtered_mv = state.millivolts;
     stable_ready = true;
-    loaded_from_settings = true;
     last_saved_percent = state.percent;
     last_percent_change_ms = k_uptime_get_32();
     k_mutex_unlock(&lumi_battery_lock);
@@ -470,28 +473,3 @@ bool lumi_battery_ready(void) {
     return ready;
 }
 
-static int lumi_battery_init(void) {
-    if (!device_is_ready(battery_sensor)) {
-        return -ENODEV;
-    }
-
-    (void)k_work_schedule(
-        &lumi_battery_measure_work,
-        K_MSEC(LUMI_BATTERY_BOOT_DELAY_MS));
-
-    /* If NVS restores a value before the first fresh measurement, publish it
-     * quickly so Windows, the device UI, and LumiPad all begin from the same
-     * stable percentage after reboot.
-     */
-    (void)k_work_schedule(
-        &lumi_battery_bas_work,
-        K_SECONDS(2));
-
-    ARG_UNUSED(loaded_from_settings);
-    return 0;
-}
-
-SYS_INIT(
-    lumi_battery_init,
-    APPLICATION,
-    CONFIG_APPLICATION_INIT_PRIORITY + 1);
