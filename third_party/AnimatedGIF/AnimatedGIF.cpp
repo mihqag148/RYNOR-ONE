@@ -296,7 +296,7 @@ uint32_t u32;
 int AnimatedGIF::playFrame(bool bSync, int *delayMilliseconds, void *pUser)
 {
 int rc;
-#if !defined( __MACH__ ) && !defined( __LINUX__ )
+#if defined(ARDUINO)
 long lTime = millis();
 #endif
 
@@ -334,11 +334,11 @@ long lTime = millis();
     // Return 1 for more frames or 0 if this was the last frame
     if (bSync)
     {
-#if !defined( __MACH__ ) && !defined( __LINUX__ ) 
+#if defined(ARDUINO)
         lTime = millis() - lTime;
         if (lTime < _gif.iFrameDelay) // need to pause a bit
            delay(_gif.iFrameDelay - lTime);
-#endif // __LINUX__
+#endif
     }
     if (delayMilliseconds) // if not NULL, return the frame delay time
         *delayMilliseconds = _gif.iFrameDelay;
