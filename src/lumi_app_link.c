@@ -1473,6 +1473,202 @@ static void handle_asset_state(bool from_usb) {
     }
 }
 
+static bool finish_raw_gif_upload(bool from_usb) {
+    bool ok =
+        !usb_gif_binary_error &&
+        lumi_ui_saver_gif_end() &&
+        lumi_ui_saver_anim_is_valid();
+
+    snprintf(
+        lumi_status,
+        sizeof(lumi_status),
+        ok
+            ? LUMIPAD_HELLO_BASE "|SAVER:READY"
+            : LUMIPAD_HELLO_BASE "|SAVER:ERROR");
+
+    lumi_diag_report(
+        ok ? 'I' : 'E',
+        ok
+            ? "Raw GIF upload READY"
+            : "Raw GIF upload ERROR");
+
+    if (from_usb) {
+        write_text_usb(
+            ok
+                ? "GIFACK|READY\r\n"
+                : "GIFACK|ERROR\r\n");
+    }
+
+    return ok;
+}
+
+static bool begin_raw_gif_upload(
+    char *save,
+    bool from_usb,
+    bool binary_mode) {
+
+    char *total_s = strtok_r(NULL, "|", &save);
+    char *scale_s = strtok_r(NULL, "|", &save);
+
+    size_t total =
+        total_s
+            ? (size_t)strtoul(total_s, NULL, 10)
+            : 0U;
+
+    uint8_t scale_mode =
+        scale_s
+            ? (uint8_t)CLAMP(atoi(scale_s), 0, 5)
+            : 0U;
+
+    bool ok =
+        total > 0U &&
+        lumi_ui_saver_gif_begin(
+            total,
+            scale_mode);
+
+    snprintf(
+        lumi_status,
+        sizeof(lumi_status),
+        ok
+            ? LUMIPAD_HELLO_BASE "|SAVER:UPLOADING"
+            : LUMIPAD_HELLO_BASE "|SAVER:ERROR");
+
+    if (binary_mode && from_usb && ok) {
+        usb_gif_binary_active = true;
+        usb_gif_binary_error = false;
+        usb_gif_binary_remaining = (uint32_t)total;
+        usb_gif_binary_offset = 0U;
+        usb_gif_binary_buffer_len = 0U;
+    }
+
+    if (from_usb) {
+        write_text_usb(
+            ok
+                ? "GIFACK|BEGIN\r\n"
+                : "GIFACK|ERROR\r\n");
+    }
+
+    return ok;
+}
+
+static void handle_gif_chunk(
+    char *save,
+    bool from_usb) {
+
+    char *offset_s = strtok_r(NULL, "|", &save);
+    char *base64 = strtok_r(NULL, "|", &save);
+
+    if (!offset_s || !base64) {
+        snprintf(
+            lumi_status,
+            sizeof(lumi_status),
+            LUMIPAD_HELLO_BASE "|SAVER:ERROR");
+        if (from_usb) {
+            write_text_usb("GIFACK|ERROR\r\n");
+        }
+        return;
+    }
+
+    size_t decoded_len = 0U;
+    int rc = base64_decode(
+        saver_chunk_tmp,
+        sizeof(saver_chunk_tmp),
+        &decoded_len,
+        (const uint8_t *)base64,
+        strlen(base64));
+
+    uint32_t offset =
+        (uint32_t)strtoul(
+            offset_s,
+            NULL,
+            10);
+
+    bool ok =
+        rc == 0 &&
+        decoded_len > 0U &&
+        lumi_ui_saver_gif_chunk(
+            offset,
+            saver_chunk_tmp,
+            decoded_len);
+
+    snprintf(
+        lumi_status,
+        sizeof(lumi_status),
+        ok
+            ? LUMIPAD_HELLO_BASE "|SAVER:UPLOADING"
+            : LUMIPAD_HELLO_BASE "|SAVER:ERROR");
+
+    if (from_usb) {
+        write_text_usb(
+            ok
+                ? "GIFACK|CHUNK\r\n"
+                : "GIFACK|ERROR\r\n");
+    }
+}
+
+static void flush_usb_gif_binary_buffer(void) {
+    if (usb_gif_binary_buffer_len == 0U) {
+        return;
+    }
+
+    if (!usb_gif_binary_error) {
+        bool ok =
+            lumi_ui_saver_gif_chunk(
+                usb_gif_binary_offset,
+                usb_gif_binary_buffer,
+                usb_gif_binary_buffer_len);
+
+        if (!ok) {
+            usb_gif_binary_error = true;
+            snprintf(
+                lumi_status,
+                sizeof(lumi_status),
+                LUMIPAD_HELLO_BASE "|SAVER:ERROR");
+        } else {
+            usb_gif_binary_offset +=
+                (uint32_t)usb_gif_binary_buffer_len;
+        }
+    }
+
+    usb_gif_binary_buffer_len = 0U;
+}
+
+static void consume_usb_gif_binary_byte(uint8_t byte) {
+    if (!usb_gif_binary_active ||
+        usb_gif_binary_remaining == 0U) {
+        return;
+    }
+
+    if (!usb_gif_binary_error) {
+        usb_gif_binary_buffer[
+            usb_gif_binary_buffer_len++] = byte;
+
+        if (usb_gif_binary_buffer_len >=
+            sizeof(usb_gif_binary_buffer)) {
+            flush_usb_gif_binary_buffer();
+        }
+    }
+
+    usb_gif_binary_remaining--;
+
+    if (usb_gif_binary_remaining == 0U) {
+        flush_usb_gif_binary_buffer();
+
+        bool error = usb_gif_binary_error;
+        usb_gif_binary_active = false;
+
+        if (error) {
+            write_text_usb("GIFACK|ERROR\r\n");
+            lumi_diag_report(
+                'E',
+                "Raw GIF binary upload failed off=%u",
+                (unsigned int)usb_gif_binary_offset);
+        } else {
+            (void)finish_raw_gif_upload(true);
+        }
+    }
+}
+
 static void handle_line(char *line, bool from_usb) {
     char *save = NULL;
     char *root = strtok_r(line, "|", &save);
