@@ -33,7 +33,7 @@ LOG_MODULE_REGISTER(lumi_app, CONFIG_ZMK_LOG_LEVEL);
 #define APP_UART_NODE DT_NODELABEL(lumi_app_uart)
 #define LINE_MAX 1200
 #define BITMAP_TMP_MAX LUMI_TITLE_BITMAP_MAX_BYTES
-#define LUMIPAD_HELLO_BASE "LUMIPAD|9|FW=" LUMI_FIRMWARE_VERSION
+#define LUMIPAD_HELLO_BASE "LUMIPAD|10|FW=" LUMI_FIRMWARE_VERSION
 #define KEYMAP_AUTOSAVE_INTERVAL_MS 1000
 #define LUMI_PROFILE_COUNT 10
 
@@ -49,7 +49,15 @@ static size_t ble_len;
 
 static uint8_t bitmap_tmp[BITMAP_TMP_MAX];
 static uint8_t artwork_tmp[LUMI_ARTWORK_BYTES];
-static uint8_t saver_chunk_tmp[768];
+static uint8_t saver_chunk_tmp[840];
+
+#define USB_GIF_BINARY_BUFFER 1024U
+static uint8_t usb_gif_binary_buffer[USB_GIF_BINARY_BUFFER];
+static size_t usb_gif_binary_buffer_len;
+static uint32_t usb_gif_binary_remaining;
+static uint32_t usb_gif_binary_offset;
+static bool usb_gif_binary_active;
+static bool usb_gif_binary_error;
 
 static char text_upload_kind;
 static uint16_t text_upload_width;
@@ -200,7 +208,7 @@ static void handle_diag_log(char *save, bool from_usb) {
 
 static void handle_caps(bool from_usb) {
     const char *response =
-        "CAPS|9|MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,HIBERNATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST,EXTFLASH,ASSETSTORE,GIFSOURCE";
+        "CAPS|10|MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,HIBERNATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST,EXTFLASH,ASSETSTORE,GIFSOURCE,GIFRAW,GIFBIN";
 
     if (from_usb) {
         write_text_usb(response);
@@ -1473,7 +1481,7 @@ static void handle_line(char *line, bool from_usb) {
     if (strcmp(root, "HELLO") == 0) {
         if (from_usb) {
             write_text_usb(
-                LUMIPAD_HELLO_BASE "|CAPS=MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,HIBERNATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST,EXTFLASH,ASSETSTORE,GIFSOURCE\r\n");
+                LUMIPAD_HELLO_BASE "|CAPS=MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,HIBERNATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST,EXTFLASH,ASSETSTORE,GIFSOURCE,GIFRAW,GIFBIN\r\n");
         }
     } else if (strcmp(root, "CAPS") == 0) {
         handle_caps(from_usb);
