@@ -79,10 +79,16 @@ static bool saver_rgb332_lut_ready;
 #define SAVER_PACKED_MODE_RGB332 1U
 #define SAVER_PACKED_FLAGS 0x03U
 #define SAVER_PACKED_HEADER_BYTES 26U
-#define SAVER_PACKED_MAX_BYTES (336U * 1024U)
+/* The W25Q128 external GIF partition is 10 MiB. Keep one 4 KiB sector
+ * for the metadata header and use the rest for packed animation payload.
+ */
+#define SAVER_FLASH_PARTITION_BYTES 0xA00000U
 #define SAVER_FLASH_DATA_OFFSET 0x1000U
 #define SAVER_FLASH_PAGE_SIZE 0x1000U
-#define SAVER_FLASH_MAX_PAGES 86U
+#define SAVER_PACKED_MAX_BYTES \
+    (SAVER_FLASH_PARTITION_BYTES - SAVER_FLASH_DATA_OFFSET)
+#define SAVER_FLASH_MAX_PAGES \
+    (SAVER_FLASH_PARTITION_BYTES / SAVER_FLASH_PAGE_SIZE)
 #define SAVER_FLASH_TIMING_OFFSET 0x40U
 #define SAVER_FLASH_TIMING_MAGIC 0x4D495453U /* "STIM" */
 
@@ -109,7 +115,9 @@ struct saver_flash_timing {
 
 static const struct flash_area *saver_flash;
 static bool saver_flash_checked;
-static uint32_t saver_flash_erased_pages[3];
+static uint32_t saver_flash_erased_pages[
+    (SAVER_FLASH_MAX_PAGES + 31U) / 32U
+];
 static uint8_t saver_media_frame_buffer[LUMI_SAVER_FRAME_BYTES];
 static uint8_t saver_media_next_frame_buffer[LUMI_SAVER_FRAME_BYTES];
 static uint8_t saver_image_row_buffer[LUMI_SAVER_IMAGE_W * 2U];
@@ -1657,13 +1665,7 @@ static int saver_flash_open_once(void) {
         return rc != 0 ? rc : -ENODEV;
     }
 
-    size_t required =
-        SAVER_FLASH_DATA_OFFSET +
-        MAX(
-            MAX(
-                (size_t)LUMI_SAVER_MAX_FRAMES * LUMI_SAVER_FRAME_BYTES,
-                (size_t)LUMI_SAVER_IMAGE_BYTES),
-            (size_t)SAVER_PACKED_MAX_BYTES);
+    size_t required = SAVER_FLASH_PARTITION_BYTES;
 
     if (saver_flash->fa_size < required) {
         lumi_diag_report('E', "Saver flash too small have=%u need=%u",
@@ -1838,7 +1840,9 @@ static bool saver_flash_load_metadata(void) {
         header.frame_bytes == 0U &&
         header.frame_count >= 1U &&
         header.data_size >= SAVER_PACKED_HEADER_BYTES &&
-        header.data_size <= SAVER_PACKED_MAX_BYTES;
+        header.data_size <= SAVER_PACKED_MAX_BYTES &&
+        ((uint64_t)SAVER_FLASH_DATA_OFFSET + header.data_size) <=
+            saver_flash->fa_size;
 
     if (header.magic != SAVER_FLASH_MAGIC ||
         header.version != SAVER_FLASH_VERSION ||
@@ -1900,7 +1904,7 @@ static bool saver_flash_load_metadata(void) {
     saver_media_valid = true;
     lumi_diag_report(
         'I',
-        "Saver metadata OK fmt=%u frames=%u interval=%ums",
+        "External saver OK fmt=%u frames=%u interval=%ums",
         (unsigned int)saver_media_format,
         (unsigned int)saver_media_frame_count,
         (unsigned int)saver_media_interval_ms);
