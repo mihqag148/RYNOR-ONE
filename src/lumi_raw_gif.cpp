@@ -24,6 +24,11 @@ constexpr int kStripeRows = 8;
 constexpr uint32_t kMinFrameDelayMs = 10U;
 constexpr uint32_t kPresentIntervalMs = 40U; /* physical LCD budget: 25 FPS */
 
+/* A requested slave frequency does not override an SPIM instance's limit. */
+BUILD_ASSERT(DT_PROP(DT_BUS(DT_CHOSEN(zephyr_display)), max_frequency) >=
+             DT_PROP(DT_CHOSEN(zephyr_display), spi_max_frequency),
+             "RYNOR TFT bus cannot supply the requested SPI clock");
+
 AnimatedGIF g_gif;
 const struct flash_area *g_area = nullptr;
 const struct device *const g_display =
@@ -47,12 +52,21 @@ int g_offset_y;
 lv_color_t g_line[kDisplayWidth];
 uint8_t g_mask[kDisplayWidth];
 
+/* AnimatedGIF reads GIF sub-block lengths one byte at a time. Without this
+ * cache, each length/data read wakes and sleeps SPI NOR and stalls the next
+ * LCD stripe. Cache source bytes, not decoded colors: palettes, transparency
+ * and source resolution remain unchanged. Never read past the uploaded GIF.
+ */
+uint8_t g_read_cache[1024];
+int32_t g_cache_start;
+int32_t g_cache_size;
+
 /*
  * Native GIF fast path.
  *
  * The old renderer called display_write() for almost every LCD row. A
  * 320x172 full-frame GIF therefore needed ~172 ST7789 transactions per frame,
- * which is both slow and visibly scans from top to bottom. Keep only an
+ * making transfers slow. Stripes do NOT synchronize to the panel scan. Keep an
  * 8-row stripe (5 KiB) in RAM and flush full-frame opaque GIFs in blocks.
  * This avoids a 110 KiB framebuffer, which the nRF52840 cannot afford.
  */
@@ -61,6 +75,7 @@ int g_stripe_start_y = -1;
 int g_stripe_rows = 0;
 
 void close_area() {
+    g_cache_size = 0;
     if (g_area) {
         flash_area_close(g_area);
         g_area = nullptr;
@@ -116,19 +131,29 @@ int32_t gif_read(
         return 0;
     }
 
-    int rc = flash_area_read(
-        g_area,
-        kGifDataOffset +
-            static_cast<uint32_t>(file->iPos),
-        buffer,
-        static_cast<size_t>(count));
-
-    if (rc != 0) {
-        return 0;
+    int32_t copied = 0;
+    while (copied < count) {
+        int32_t offset = file->iPos - g_cache_start;
+        if (g_cache_size == 0 || offset < 0 || offset >= g_cache_size) {
+            g_cache_size = 0;
+            g_cache_start = file->iPos;
+            int32_t refill = MIN(static_cast<int32_t>(sizeof(g_read_cache)),
+                                 file->iSize - file->iPos);
+            if (flash_area_read(g_area,
+                    kGifDataOffset + static_cast<uint32_t>(file->iPos),
+                    g_read_cache, static_cast<size_t>(refill)) != 0) {
+                return copied;
+            }
+            g_cache_size = refill;
+            offset = 0;
+        }
+        int32_t chunk = MIN(count - copied, g_cache_size - offset);
+        memcpy(buffer + copied, g_read_cache + offset,
+               static_cast<size_t>(chunk));
+        file->iPos += chunk;
+        copied += chunk;
     }
-
-    file->iPos += count;
-    return count;
+    return copied;
 }
 
 int32_t gif_seek(
@@ -412,6 +437,24 @@ void gif_draw(GIFDRAW *draw) {
         g_frame_forced_present = true;
     }
 
+    /* Native-size opaque video needs only a palette lookup. The generic
+     * scaler did two 64-bit divisions per pixel even for this 1:1 case,
+     * inserting CPU work between LCD stripes on a 64 MHz Cortex-M4.
+     * Interlaced rows still go through append_full_width_row(), which flushes
+     * on a discontinuity; partial/transparent/scaled GIFs retain their path.
+     */
+    if (full_frame_opaque &&
+        g_source_width == kDisplayWidth &&
+        g_source_height == kDisplayHeight &&
+        g_content_width == kDisplayWidth &&
+        g_content_height == kDisplayHeight) {
+        for (int x = 0; x < kDisplayWidth; ++x) {
+            g_line[x].full = palette[pixels[x]];
+        }
+        append_full_width_row(source_y, g_line);
+        return;
+    }
+
     if (full_frame_opaque) {
         lv_color_t black =
             lv_color_make(0, 0, 0);
@@ -687,6 +730,19 @@ extern "C" bool lumi_raw_gif_render_due(
             false,
             &delay_ms,
             nullptr);
+
+    if (more < 0) {
+        lumi_diag_report('E', "Raw GIF decode error=%d", g_gif.getLastError());
+        g_stripe_rows = 0;
+        g_stripe_start_y = -1;
+        lumi_raw_gif_stop();
+        return false;
+    }
+
+    /* A frame may end with fewer than eight rows (including interlaced
+     * order). Commit that tail before returning to LVGL or resetting GIF.
+     */
+    flush_stripe();
 
     if (!g_suppress_opaque_output ||
         g_frame_forced_present) {

@@ -17,11 +17,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  renderer-tests:
+    name: GIF renderer host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tests/run_raw_gif_tests.py
   build:
     uses: zmkfirmware/zmk/.github/workflows/build-user-config.yml@v0.3
   pr-checks:
     name: PR checks
-    needs: build
+    needs: [build, renderer-tests]
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -30,10 +36,11 @@ jobs:
       - name: Require successful build
         env:
           BUILD_RESULT: ${{ needs.build.result }}
-        run: test "$BUILD_RESULT" = success
+          TEST_RESULT: ${{ needs.renderer-tests.result }}
+        run: test "$BUILD_RESULT" = success && test "$TEST_RESULT" = success
 
   release:
-    needs: build
+    needs: [build, renderer-tests]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
