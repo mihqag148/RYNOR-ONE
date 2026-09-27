@@ -1764,6 +1764,13 @@ static void lumi_app_thread(void) {
 
     lumi_diag_report('I', "Firmware diagnostics online");
 
+    bool ext_flash_ready = lumi_ext_storage_ready();
+    lumi_diag_report(
+        ext_flash_ready ? 'I' : 'E',
+        ext_flash_ready
+            ? "External flash ready: 10MiB GIF + 2MiB assets + 4MiB reserve"
+            : "External flash not ready");
+
     int64_t next_keymap_autosave_at =
         k_uptime_get() + KEYMAP_AUTOSAVE_INTERVAL_MS;
 
