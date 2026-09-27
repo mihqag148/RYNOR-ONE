@@ -13,13 +13,20 @@ with tempfile.TemporaryDirectory() as directory:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('#include "test_platform.h"\n')
     executable = tmp / "raw-gif-tests"
-    subprocess.run([
+    flags = [
         "g++", "-std=c++17", "-O1", "-g", "-fsanitize=address,undefined",
-        "-fno-omit-frame-pointer", "-I" + str(tmp),
+        "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-I" + str(tmp),
         "-I" + str(ROOT / "tests"),
         "-I" + str(ROOT / "third_party/AnimatedGIF"),
-        str(ROOT / "tests/raw_gif_test.cpp"),
+    ]
+    # Upstream deliberately uses unaligned wide loads on x86_64. Its Cortex-M4
+    # configuration here uses byte reads instead. Disable only this host-only
+    # alignment diagnostic in the vendor translation unit; retain every
+    # sanitizer, including alignment, for our renderer and fail on reports.
+    decoder = tmp / "decoder.o"
+    subprocess.run(flags + ["-fno-sanitize=alignment", "-c",
         str(ROOT / "third_party/AnimatedGIF/AnimatedGIF.cpp"),
-        "-o", str(executable),
-    ], check=True)
+        "-o", str(decoder)], check=True)
+    subprocess.run(flags + [str(ROOT / "tests/raw_gif_test.cpp"),
+        str(decoder), "-o", str(executable)], check=True)
     subprocess.run([str(executable)], check=True)
