@@ -1103,9 +1103,33 @@ static void handle_txt(char *save) {
 
 static void handle_mem(bool from_usb) {
     size_t flash_used = (size_t)_flash_used;
-    size_t flash_total = DT_REG_SIZE(DT_NODELABEL(code_partition));
+    size_t flash_total = DT_REG_SIZE(DT_NODELABEL(flash0));
     size_t ram_used = (size_t)(_image_ram_end - _image_ram_start);
     size_t ram_total = DT_REG_SIZE(DT_NODELABEL(sram0));
+
+    /* RYNOR ONE has a dedicated 16 MiB W25Q128 for media/assets in addition
+     * to the nRF52840 internal code flash. Report the physical storage that is
+     * actually usable by RYNOR so LumiPad no longer looks like the external
+     * flash is missing.
+     */
+    if (lumi_ext_storage_ready()) {
+        const size_t ext_total =
+            (size_t)LUMI_EXT_GIF_BYTES +
+            (size_t)LUMI_EXT_ASSET_BYTES +
+            (size_t)LUMI_EXT_RESERVE_BYTES;
+
+        size_t ext_used =
+            (size_t)lumi_ui_saver_storage_used();
+
+        if (lumi_ext_asset_valid()) {
+            ext_used +=
+                (size_t)LUMI_EXT_ASSET_DATA_OFFSET +
+                (size_t)lumi_ext_asset_size();
+        }
+
+        flash_total += ext_total;
+        flash_used += MIN(ext_used, ext_total);
+    }
 
     char response[96];
     snprintf(
