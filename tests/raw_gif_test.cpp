@@ -93,9 +93,54 @@ static void test_render_rows(bool interlaced) {
     g_suppress_opaque_output = false;
 }
 
+static void test_complete_gif() {
+    // A complete native-size GIF, with literal LZW codes and alternating
+    // red/green pixels. Exercise the real decoder and render_due frame tail,
+    // not only direct row callbacks. Clear codes keep the code width at 3.
+    flash_bytes = {'G','I','F','8','9','a', 0x40,1, 172,0, 0x80,0,0,
+                   255,0,0, 0,255,0,
+                   0x21,0xF9,4,0,4,0,0,0,
+                   0x2C,0,0,0,0,0x40,1,172,0,0,2};
+    std::vector<uint8_t> compressed;
+    unsigned bits = 0, count = 0;
+    auto code = [&](unsigned value) {
+        bits |= value << count;
+        count += 3;
+        while (count >= 8) {
+            compressed.push_back(bits & 255);
+            bits >>= 8;
+            count -= 8;
+        }
+    };
+    for (int i = 0; i < 320 * 172; ++i) { code(4); code(i % 2); }
+    code(5);
+    if (count) compressed.push_back(bits & 255);
+    for (size_t i = 0; i < compressed.size(); i += 255) {
+        size_t size = std::min(size_t(255), compressed.size() - i);
+        flash_bytes.push_back(size);
+        flash_bytes.insert(flash_bytes.end(), compressed.begin() + i,
+                           compressed.begin() + i + size);
+    }
+    flash_bytes.push_back(0);
+    flash_bytes.push_back(0x3B);
+    lumi_raw_gif_configure(flash_bytes.size(), 0);
+    writes = 0;
+    assert(lumi_raw_gif_render_due(0));
+    assert(writes == 44); // 22 clear stripes + 22 complete image stripes.
+    for (int i = 0; i < 320 * 172; ++i)
+        assert(lcd[i] == (i % 2 ? 0xE007 : 0x00F8)); // RGB565 big-endian
+    int before = writes;
+    assert(lumi_raw_gif_render_due(10));
+    assert(writes == before); // Respect GIF's 40 ms frame delay.
+    assert(lumi_raw_gif_render_due(40)); // Restart at EOF through cached seeks.
+    assert(writes == before + 22);
+    lumi_raw_gif_stop();
+}
+
 int main() {
     test_flash_cache();
     test_render_rows(false);
     test_render_rows(true);
-    puts("Raw GIF cache, native/interlaced output and transparency tests passed");
+    test_complete_gif();
+    puts("Raw GIF cache, rendering, transparency and complete decode tests passed");
 }
