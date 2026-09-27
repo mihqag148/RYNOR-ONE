@@ -1533,9 +1533,10 @@ static bool begin_raw_gif_upload(
             ? LUMIPAD_HELLO_BASE "|SAVER:UPLOADING"
             : LUMIPAD_HELLO_BASE "|SAVER:ERROR");
 
+    usb_gif_binary_error = false;
+
     if (binary_mode && from_usb && ok) {
         usb_gif_binary_active = true;
-        usb_gif_binary_error = false;
         usb_gif_binary_remaining = (uint32_t)total;
         usb_gif_binary_offset = 0U;
         usb_gif_binary_buffer_len = 0U;
@@ -1749,6 +1750,27 @@ static void handle_line(char *line, bool from_usb) {
     } else if (strcmp(root, "ART") == 0) {
         /* Legacy single-line format kept for older apps. */
         handle_art(save);
+    } else if (strcmp(root, "GIFBINBEGIN") == 0) {
+        if (from_usb) {
+            (void)begin_raw_gif_upload(
+                save,
+                true,
+                true);
+        } else {
+            snprintf(
+                lumi_status,
+                sizeof(lumi_status),
+                LUMIPAD_HELLO_BASE "|SAVER:ERROR");
+        }
+    } else if (strcmp(root, "GIFBEGIN") == 0) {
+        (void)begin_raw_gif_upload(
+            save,
+            from_usb,
+            false);
+    } else if (strcmp(root, "GIFCHUNK") == 0) {
+        handle_gif_chunk(save, from_usb);
+    } else if (strcmp(root, "GIFEND") == 0) {
+        (void)finish_raw_gif_upload(from_usb);
     } else if (strcmp(root, "SAVPBEGIN") == 0) {
         handle_savpbegin(save);
         if (from_usb) {
@@ -1985,7 +2007,17 @@ static void lumi_app_thread(void) {
 
         while (uart_poll_in(app_uart, &c) == 0) {
             read_any = true;
-            feed_bytes(usb_line, &usb_len, &c, 1, true);
+
+            if (usb_gif_binary_active) {
+                consume_usb_gif_binary_byte(c);
+            } else {
+                feed_bytes(
+                    usb_line,
+                    &usb_len,
+                    &c,
+                    1,
+                    true);
+            }
         }
 
         int64_t now = k_uptime_get();
