@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <string.h>
 
+#include <zephyr/device.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/util.h>
 
@@ -52,6 +53,11 @@ static int open_area(
     int rc = flash_area_open(id, &area);
     if (rc != 0 || !area) {
         return rc != 0 ? rc : -ENODEV;
+    }
+
+    if (!device_is_ready(area->fa_dev)) {
+        flash_area_close(area);
+        return -ENODEV;
     }
 
     if (area->fa_size < expected_size) {
