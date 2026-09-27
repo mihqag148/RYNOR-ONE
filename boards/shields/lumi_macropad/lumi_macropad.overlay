@@ -226,7 +226,10 @@
 // MOSI P0.17, SCLK P0.20, CS P0.22, DC P0.24, RST P1.00.
 // ZMK v0.3 uses Zephyr 3.5, whose ST7789 driver expects the display node
 // directly below the SPI controller.
-&spi1 {
+// Only SPIM3 on nRF52840 supports 32 MHz. SPIM1 silently clamps the
+// requested 32 MHz to 8 MHz in Zephyr, stretching each RGB565 frame to
+// at least 110 ms. Pin routing is independent of the peripheral instance.
+&spi3 {
     compatible = "nordic,nrf-spim";
     status = "okay";
     pinctrl-0 = <&lumi_tft_spi_default>;
@@ -320,7 +323,8 @@
 
 // Six WS2812B LEDs on P0.06. The SPI peripheral only generates the
 // WS2812 data waveform; there is no separate SCK wire to the LEDs.
-&spi3 {
+// WS2812 needs only 4 MHz; leave the high-speed instance for the TFT.
+&spi1 {
     compatible = "nordic,nrf-spim";
     status = "okay";
     pinctrl-0 = <&lumi_rgb_spi_default>;
