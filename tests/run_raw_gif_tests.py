@@ -7,8 +7,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory() as directory:
     tmp = pathlib.Path(directory)
     for name in ("zephyr/device.h", "zephyr/devicetree.h",
-                 "zephyr/drivers/display.h", "zephyr/storage/flash_map.h",
-                 "zephyr/sys/util.h", "lvgl.h"):
+                 "zephyr/drivers/display.h", "zephyr/kernel.h",
+                 "zephyr/storage/flash_map.h", "zephyr/sys/util.h", "lvgl.h"):
         path = tmp / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('#include "test_platform.h"\n')
