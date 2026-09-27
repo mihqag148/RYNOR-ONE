@@ -1867,9 +1867,23 @@ static bool saver_flash_load_metadata(void) {
         ((uint64_t)SAVER_FLASH_DATA_OFFSET + header.data_size) <=
             saver_flash->fa_size;
 
+    bool raw_gif_ok =
+        header.format == SAVER_FORMAT_RAW_GIF &&
+        header.frame_bytes == 0U &&
+        header.frame_count == 1U &&
+        header.width >= 1U &&
+        header.height >= 1U &&
+        header.width <= 2048U &&
+        header.height <= 2048U &&
+        header.interval_ms <= 5U &&
+        header.data_size >= 13U &&
+        header.data_size <= SAVER_PACKED_MAX_BYTES &&
+        ((uint64_t)SAVER_FLASH_DATA_OFFSET + header.data_size) <=
+            saver_flash->fa_size;
+
     if (header.magic != SAVER_FLASH_MAGIC ||
         header.version != SAVER_FLASH_VERSION ||
-        (!gif_ok && !static_ok && !packed_ok)) {
+        (!gif_ok && !static_ok && !packed_ok && !raw_gif_ok)) {
         lumi_diag_report(
             'W',
             "Saver metadata invalid magic=%08x fmt=%u frames=%u",
@@ -1889,6 +1903,18 @@ static bool saver_flash_load_metadata(void) {
             lumi_diag_report('W', "RYQ1 header mismatch");
             return false;
         }
+    } else if (raw_gif_ok) {
+        saver_raw_gif_data_size = header.data_size;
+        saver_raw_gif_expected_bytes = 0U;
+        saver_raw_gif_received_bytes = 0U;
+        saver_raw_gif_source_width = header.width;
+        saver_raw_gif_source_height = header.height;
+        saver_raw_gif_scale_mode = (uint8_t)header.interval_ms;
+        saver_media_frame_count = 1U;
+        saver_media_interval_ms = SAVER_PACKED_MIN_FRAME_MS;
+        lumi_raw_gif_configure(
+            saver_raw_gif_data_size,
+            saver_raw_gif_scale_mode);
     } else {
         saver_media_frame_count = header.frame_count;
         saver_timing_set_uniform(
