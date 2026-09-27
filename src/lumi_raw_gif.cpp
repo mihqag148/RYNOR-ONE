@@ -144,14 +144,13 @@ bool panel_command(
         return false;
     }
 
-    struct spi_buf command_buffer = {
-        .buf = &command,
-        .len = 1U,
-    };
-    struct spi_buf_set command_set = {
-        .buffers = &command_buffer,
-        .count = 1U,
-    };
+    struct spi_buf command_buffer = {};
+    command_buffer.buf = &command;
+    command_buffer.len = 1U;
+
+    struct spi_buf_set command_set = {};
+    command_set.buffers = &command_buffer;
+    command_set.count = 1U;
 
     /* cmd-data-gpios is active-low: logical 1 drives D/C low (command). */
     if (gpio_pin_set_dt(&g_panel_dc, 1) != 0 ||
@@ -163,14 +162,14 @@ bool panel_command(
         return true;
     }
 
-    struct spi_buf data_buffer = {
-        .buf = const_cast<uint8_t *>(data),
-        .len = length,
-    };
-    struct spi_buf_set data_set = {
-        .buffers = &data_buffer,
-        .count = 1U,
-    };
+    struct spi_buf data_buffer = {};
+    data_buffer.buf =
+        const_cast<uint8_t *>(data);
+    data_buffer.len = length;
+
+    struct spi_buf_set data_set = {};
+    data_set.buffers = &data_buffer;
+    data_set.count = 1U;
 
     /* logical 0 drives D/C high (pixel/parameter data). */
     return gpio_pin_set_dt(&g_panel_dc, 0) == 0 &&
