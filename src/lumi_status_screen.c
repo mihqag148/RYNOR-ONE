@@ -1669,6 +1669,12 @@ static int saver_flash_open_once(void) {
         return rc != 0 ? rc : -ENODEV;
     }
 
+    if (!device_is_ready(saver_flash->fa_dev)) {
+        lumi_diag_report('E', "External saver flash device not ready");
+        saver_flash = NULL;
+        return -ENODEV;
+    }
+
     size_t required = SAVER_FLASH_PARTITION_BYTES;
 
     if (saver_flash->fa_size < required) {
