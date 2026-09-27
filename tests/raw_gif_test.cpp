@@ -93,6 +93,35 @@ static void test_render_rows(bool interlaced) {
     g_suppress_opaque_output = false;
 }
 
+static void test_rgb444_pack() {
+    uint16_t palette[256] = {};
+    uint8_t pixels[320] = {};
+
+    /* AnimatedGIF RGB565_BE numeric values on little-endian nRF52840:
+     * red=0x00F8, green=0xE007. Two pixels become RGB444 bytes F0 0F F0.
+     */
+    palette[1] = 0x00F8;
+    palette[2] = 0xE007;
+    pixels[0] = 1;
+    pixels[1] = 2;
+
+    g_fast_panel_mode = true;
+    g_rgb444_rows = 0;
+    g_rgb444_start_y = -1;
+
+    append_rgb444_row(0, pixels, palette);
+
+    assert(g_rgb444_rows == 1);
+    assert(g_rgb444_start_y == 0);
+    assert(g_rgb444_stripe[0] == 0xF0);
+    assert(g_rgb444_stripe[1] == 0x00);
+    assert(g_rgb444_stripe[2] == 0xF0);
+
+    g_rgb444_rows = 0;
+    g_rgb444_start_y = -1;
+    g_fast_panel_mode = false;
+}
+
 static void test_complete_gif() {
     // A complete native-size GIF, with literal LZW codes and alternating
     // red/green pixels. Exercise the real decoder and render_due frame tail,
@@ -141,6 +170,7 @@ int main() {
     test_flash_cache();
     test_render_rows(false);
     test_render_rows(true);
+    test_rgb444_pack();
     test_complete_gif();
     puts("Raw GIF cache, rendering, transparency and complete decode tests passed");
 }
