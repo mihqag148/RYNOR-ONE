@@ -226,14 +226,13 @@ void clear_display() {
         g_line[x] = black;
     }
 
-    struct display_buffer_descriptor desc = {
-        .buf_size =
-            static_cast<size_t>(kDisplayWidth) *
-            sizeof(lv_color_t),
-        .width = kDisplayWidth,
-        .height = 1U,
-        .pitch = kDisplayWidth,
-    };
+    struct display_buffer_descriptor desc = {};
+    desc.buf_size =
+        static_cast<size_t>(kDisplayWidth) *
+        sizeof(lv_color_t);
+    desc.width = kDisplayWidth;
+    desc.height = 1U;
+    desc.pitch = kDisplayWidth;
 
     for (int y = 0; y < kDisplayHeight; ++y) {
         (void)display_write(
@@ -364,16 +363,15 @@ void gif_draw(GIFDRAW *draw) {
 
             int width = x - start;
 
-            struct display_buffer_descriptor desc = {
-                .buf_size =
-                    static_cast<size_t>(width) *
-                    sizeof(lv_color_t),
-                .width =
-                    static_cast<uint16_t>(width),
-                .height = 1U,
-                .pitch =
-                    static_cast<uint16_t>(width),
-            };
+            struct display_buffer_descriptor desc = {};
+            desc.buf_size =
+                static_cast<size_t>(width) *
+                sizeof(lv_color_t);
+            desc.width =
+                static_cast<uint16_t>(width);
+            desc.height = 1U;
+            desc.pitch =
+                static_cast<uint16_t>(width);
 
             (void)display_write(
                 g_display,
