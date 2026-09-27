@@ -62,7 +62,9 @@ static lv_obj_t *saver_title;
 
 #define SAVER_STRIPE_SRC_ROWS 16U
 #define SAVER_STRIPE_DST_ROWS (SAVER_STRIPE_SRC_ROWS * 2U)
-#define SAVER_MIN_FRAME_MS 40U /* 25 FPS maximum playback rate */
+#define SAVER_MIN_FRAME_MS 40U /* legacy RGB332 path: 25 FPS max */
+#define SAVER_PACKED_MIN_FRAME_MS 10U /* GIF source timing granularity */
+#define SAVER_PACKED_MAX_FPS 100U
 
 static const struct device *const saver_display =
     DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
@@ -1775,9 +1777,8 @@ static bool saver_packed_load_header(
         display_width != 320U ||
         display_height != 172U ||
         frame_count < 1U ||
-        frame_count > 250U ||
-        fps < 15U ||
-        fps > 25U ||
+        fps < 1U ||
+        fps > SAVER_PACKED_MAX_FPS ||
         duration_ms == 0U ||
         palette_count != 0U) {
         return false;
@@ -1797,10 +1798,14 @@ static bool saver_packed_load_header(
         saver_packed_color_mode = color_mode;
         saver_packed_header_ready = true;
         saver_packed_playback_started = false;
-        saver_media_frame_count = (uint8_t)frame_count;
+        /* Packed playback uses its own 16-bit frame counter and per-frame
+         * duration. Keep this legacy 8-bit field only for diagnostics/state.
+         */
+        saver_media_frame_count =
+            (uint8_t)MIN((uint16_t)UINT8_MAX, frame_count);
         saver_media_interval_ms =
             (uint16_t)MAX(
-                (uint32_t)SAVER_MIN_FRAME_MS,
+                (uint32_t)SAVER_PACKED_MIN_FRAME_MS,
                 (1000U + fps - 1U) / fps);
     }
 
@@ -1871,7 +1876,6 @@ static bool saver_flash_load_metadata(void) {
 
     if (packed_ok) {
         if (!saver_packed_load_header(header.data_size, true) ||
-            saver_packed_frame_count != header.frame_count ||
             saver_packed_storage_width != header.width ||
             saver_packed_storage_height != header.height) {
             lumi_diag_report('W', "RYQ1 header mismatch");
@@ -2119,7 +2123,12 @@ static int saver_flash_commit_header(void) {
             : (static_image
                 ? LUMI_SAVER_IMAGE_BYTES
                 : LUMI_SAVER_FRAME_BYTES),
-        .frame_count = saver_media_frame_count,
+        /* The outer legacy metadata field is only 8-bit. RYQ1 stores the
+         * authoritative 16-bit frame count in its own header.
+         */
+        .frame_count = packed_animation
+            ? 1U
+            : saver_media_frame_count,
         .format = saver_media_format,
         .interval_ms = static_image
             ? 1000U
@@ -2661,7 +2670,15 @@ static void draw_custom_saver_frame(
 }
 
 static void refresh_screensaver(lv_timer_t *timer) {
-    ARG_UNUSED(timer);
+    /* RYQ1 stores exact per-frame GIF delays. Poll it at GIF's 10 ms timing
+     * granularity; keep the older RGB332 path at 40 ms so it does not redraw
+     * four times more often than before.
+     */
+    lv_timer_set_period(
+        timer,
+        saver_media_format == SAVER_FORMAT_RYQ1
+            ? SAVER_PACKED_MIN_FRAME_MS
+            : SAVER_MIN_FRAME_MS);
 
     uint32_t now_uptime = k_uptime_get_32();
     uint32_t delay;
