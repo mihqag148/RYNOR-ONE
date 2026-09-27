@@ -70,8 +70,6 @@ static lv_obj_t *saver_title;
 static const struct device *const saver_display =
     DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 static lv_color_t saver_stripe_buf[320U * SAVER_STRIPE_DST_ROWS];
-static lv_color_t saver_rgb332_lut[256];
-static bool saver_rgb332_lut_ready;
 
 #define SAVER_FLASH_MAGIC 0x4C534156U /* "LSAV" */
 #define SAVER_FLASH_VERSION 2U
@@ -127,12 +125,9 @@ static uint32_t saver_flash_erased_pages[
     (SAVER_FLASH_MAX_PAGES + 31U) / 32U
 ];
 static uint8_t saver_media_frame_buffer[LUMI_SAVER_FRAME_BYTES];
-static uint8_t saver_media_next_frame_buffer[LUMI_SAVER_FRAME_BYTES];
 static uint8_t saver_image_row_buffer[LUMI_SAVER_IMAGE_W * 2U];
 static uint8_t saver_prefetched_index;
-static uint8_t saver_prefetched_next_index;
 static bool saver_prefetch_valid;
-static bool saver_prefetch_next_valid;
 static uint8_t saver_media_frame_count;
 static uint8_t saver_media_format = SAVER_FORMAT_RGB332;
 static uint32_t saver_media_received_mask;
@@ -1947,7 +1942,6 @@ static bool saver_flash_load_metadata(void) {
     saver_media_index = 0U;
     saver_media_epoch_ms = 0U;
     saver_prefetch_valid = false;
-    saver_prefetch_next_valid = false;
     saver_static_drawn = false;
     saver_media_valid = true;
     lumi_diag_report(
@@ -2585,14 +2579,11 @@ static bool saver_packed_decode_next_frame(uint32_t now_ms) {
     return true;
 }
 
-static bool saver_prepare_blend_frames(uint8_t frame_index) {
+static bool saver_prepare_legacy_frame(uint8_t frame_index) {
     if (saver_media_format != SAVER_FORMAT_RGB332 ||
         frame_index >= saver_media_frame_count) {
         return false;
     }
-
-    uint8_t next_index =
-        (uint8_t)((frame_index + 1U) % saver_media_frame_count);
 
     if (!saver_prefetch_valid ||
         saver_prefetched_index != frame_index) {
@@ -2607,25 +2598,14 @@ static bool saver_prepare_blend_frames(uint8_t frame_index) {
         saver_prefetch_valid = true;
     }
 
-    if (!saver_prefetch_next_valid ||
-        saver_prefetched_next_index != next_index) {
-        if (saver_flash_read_frame_into(
-                next_index,
-                saver_media_next_frame_buffer) != 0) {
-            saver_prefetch_next_valid = false;
-            return false;
-        }
-
-        saver_prefetched_next_index = next_index;
-        saver_prefetch_next_valid = true;
-    }
-
     return true;
 }
 
 static void draw_custom_saver_frame(
     uint8_t frame_index,
     uint8_t blend) {
+
+    ARG_UNUSED(blend);
 
     if (saver_media_format == SAVER_FORMAT_RGB565_STATIC) {
         draw_static_saver_image();
@@ -2634,7 +2614,7 @@ static void draw_custom_saver_frame(
 
     if (!device_is_ready(saver_display) ||
         frame_index >= saver_media_frame_count ||
-        !saver_prepare_blend_frames(frame_index)) {
+        !saver_prepare_legacy_frame(frame_index)) {
         return;
     }
 
@@ -2648,11 +2628,8 @@ static void draw_custom_saver_frame(
         uint16_t dst_rows = (uint16_t)(src_rows * 2U);
 
         for (uint16_t row = 0U; row < src_rows; row++) {
-            const uint8_t *src_a =
+            const uint8_t *src =
                 &saver_media_frame_buffer[
-                    (size_t)(src_y + row) * LUMI_SAVER_FRAME_W];
-            const uint8_t *src_b =
-                &saver_media_next_frame_buffer[
                     (size_t)(src_y + row) * LUMI_SAVER_FRAME_W];
 
             lv_color_t *dst0 =
@@ -2660,29 +2637,14 @@ static void draw_custom_saver_frame(
             lv_color_t *dst1 = dst0 + 320U;
 
             for (uint16_t x = 0U; x < LUMI_SAVER_FRAME_W; x++) {
-                uint8_t a = src_a[x];
-                uint8_t b = src_b[x];
+                uint8_t value = src[x];
 
-                uint16_t ar =
-                    (uint16_t)((((a >> 5) & 0x07U) * 255U) / 7U);
-                uint16_t ag =
-                    (uint16_t)((((a >> 2) & 0x07U) * 255U) / 7U);
-                uint16_t ab =
-                    (uint16_t)(((a & 0x03U) * 255U) / 3U);
-
-                uint16_t br =
-                    (uint16_t)((((b >> 5) & 0x07U) * 255U) / 7U);
-                uint16_t bg =
-                    (uint16_t)((((b >> 2) & 0x07U) * 255U) / 7U);
-                uint16_t bb =
-                    (uint16_t)(((b & 0x03U) * 255U) / 3U);
-
-                uint8_t r = (uint8_t)(
-                    ar + (((int32_t)br - ar) * blend) / 255);
-                uint8_t g = (uint8_t)(
-                    ag + (((int32_t)bg - ag) * blend) / 255);
-                uint8_t blue = (uint8_t)(
-                    ab + (((int32_t)bb - ab) * blend) / 255);
+                uint8_t r =
+                    (uint8_t)((((value >> 5) & 0x07U) * 255U) / 7U);
+                uint8_t g =
+                    (uint8_t)((((value >> 2) & 0x07U) * 255U) / 7U);
+                uint8_t blue =
+                    (uint8_t)(((value & 0x03U) * 255U) / 3U);
 
                 lv_color_t color = lv_color_make(r, g, blue);
                 dst0[x * 2U] = color;
@@ -2838,7 +2800,6 @@ static void refresh_screensaver(lv_timer_t *timer) {
 
         saver_media_index = 0U;
         saver_prefetch_valid = false;
-        saver_prefetch_next_valid = false;
         saver_static_drawn = false;
         saver_media_epoch_ms = lv_tick_get();
 
@@ -2969,7 +2930,6 @@ bool lumi_ui_saver_anim_begin(uint8_t frame_count, uint16_t frame_interval_ms) {
     saver_media_index = 0U;
     saver_media_epoch_ms = 0U;
     saver_prefetch_valid = false;
-    saver_prefetch_next_valid = false;
     saver_static_drawn = false;
     k_mutex_unlock(&lumi_ui_config_lock);
 
@@ -3060,7 +3020,6 @@ bool lumi_ui_saver_anim_end(void) {
         saver_media_index = 0U;
         saver_media_epoch_ms = 0U;
         saver_prefetch_valid = false;
-        saver_prefetch_next_valid = false;
         saver_static_drawn = false;
     } else {
         saver_media_valid = false;
@@ -3086,7 +3045,6 @@ bool lumi_ui_saver_packed_begin(size_t total_bytes) {
     saver_packed_received_bytes = 0U;
     saver_static_drawn = false;
     saver_prefetch_valid = false;
-    saver_prefetch_next_valid = false;
     k_mutex_unlock(&lumi_ui_config_lock);
 
     if (saver_flash_prepare_upload() != 0) {
@@ -3138,7 +3096,6 @@ bool lumi_ui_saver_packed_end(void) {
         saver_media_index = 0U;
         saver_media_epoch_ms = 0U;
         saver_prefetch_valid = false;
-        saver_prefetch_next_valid = false;
         saver_static_drawn = false;
         saver_packed_cursor = saver_packed_frames_offset;
         saver_packed_frame_index = 0U;
@@ -3176,7 +3133,6 @@ bool lumi_ui_saver_gif_begin(
     saver_raw_gif_scale_mode = scale_mode;
     saver_static_drawn = false;
     saver_prefetch_valid = false;
-    saver_prefetch_next_valid = false;
     k_mutex_unlock(&lumi_ui_config_lock);
 
     if (saver_flash_prepare_upload() != 0) {
@@ -3252,7 +3208,6 @@ bool lumi_ui_saver_gif_end(void) {
         saver_media_index = 0U;
         saver_media_epoch_ms = 0U;
         saver_prefetch_valid = false;
-        saver_prefetch_next_valid = false;
         saver_static_drawn = false;
 
         lumi_diag_report(
@@ -3286,7 +3241,6 @@ bool lumi_ui_saver_image_begin(size_t total_bytes) {
     saver_media_index = 0U;
     saver_media_epoch_ms = 0U;
     saver_prefetch_valid = false;
-    saver_prefetch_next_valid = false;
     saver_static_drawn = false;
     k_mutex_unlock(&lumi_ui_config_lock);
 
@@ -3331,7 +3285,6 @@ bool lumi_ui_saver_image_end(void) {
         saver_media_index = 0U;
         saver_media_epoch_ms = 0U;
         saver_prefetch_valid = false;
-        saver_prefetch_next_valid = false;
         saver_static_drawn = false;
     } else {
         saver_media_valid = false;
@@ -3361,7 +3314,6 @@ void lumi_ui_saver_anim_clear(void) {
     memset(saver_media_received_bytes, 0, sizeof(saver_media_received_bytes));
     saver_media_index = 0U;
     saver_prefetch_valid = false;
-    saver_prefetch_next_valid = false;
     saver_static_drawn = false;
 }
 
