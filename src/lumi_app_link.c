@@ -21,6 +21,7 @@
 
 #include "lumi_app_link.h"
 #include "lumi_battery.h"
+#include "lumi_ext_storage.h"
 #include "lumi_now_playing.h"
 #include "lumi_rgb.h"
 #include "lumi_ui_config.h"
@@ -32,7 +33,7 @@ LOG_MODULE_REGISTER(lumi_app, CONFIG_ZMK_LOG_LEVEL);
 #define APP_UART_NODE DT_NODELABEL(lumi_app_uart)
 #define LINE_MAX 1200
 #define BITMAP_TMP_MAX LUMI_TITLE_BITMAP_MAX_BYTES
-#define LUMIPAD_HELLO_BASE "LUMIPAD|7|FW=" LUMI_FIRMWARE_VERSION
+#define LUMIPAD_HELLO_BASE "LUMIPAD|8|FW=" LUMI_FIRMWARE_VERSION
 #define KEYMAP_AUTOSAVE_INTERVAL_MS 1000
 #define LUMI_PROFILE_COUNT 10
 
@@ -48,7 +49,7 @@ static size_t ble_len;
 
 static uint8_t bitmap_tmp[BITMAP_TMP_MAX];
 static uint8_t artwork_tmp[LUMI_ARTWORK_BYTES];
-static uint8_t saver_chunk_tmp[256];
+static uint8_t saver_chunk_tmp[768];
 
 static char text_upload_kind;
 static uint16_t text_upload_width;
@@ -199,7 +200,7 @@ static void handle_diag_log(char *save, bool from_usb) {
 
 static void handle_caps(bool from_usb) {
     const char *response =
-        "CAPS|7|MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,HIBERNATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST";
+        "CAPS|8|MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,HIBERNATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST,EXTFLASH,ASSETSTORE";
 
     if (from_usb) {
         write_text_usb(response);
@@ -1322,6 +1323,147 @@ static void handle_power_state(bool from_usb) {
     }
 }
 
+static void handle_storage_info(bool from_usb) {
+    char response[96];
+    bool ready = lumi_ext_storage_ready();
+    bool asset_ready = ready && lumi_ext_asset_valid();
+    uint32_t asset_size = asset_ready
+        ? lumi_ext_asset_size()
+        : 0U;
+
+    snprintf(
+        response,
+        sizeof(response),
+        "STORAGE|%u|%u|%u|%u|%u|%u",
+        ready ? 1U : 0U,
+        (unsigned int)LUMI_EXT_GIF_BYTES,
+        (unsigned int)LUMI_EXT_ASSET_BYTES,
+        (unsigned int)LUMI_EXT_RESERVE_BYTES,
+        asset_ready ? 1U : 0U,
+        (unsigned int)asset_size);
+
+    if (from_usb) {
+        write_text_usb(response);
+        write_text_usb("\r\n");
+    } else {
+        snprintf(lumi_status, sizeof(lumi_status), "%s", response);
+    }
+}
+
+static void handle_asset_begin(char *save, bool from_usb) {
+    char *total_s = strtok_r(NULL, "|", &save);
+    size_t total =
+        total_s
+            ? (size_t)strtoul(total_s, NULL, 10)
+            : 0U;
+
+    bool ok = lumi_ext_asset_begin(total);
+
+    snprintf(
+        lumi_status,
+        sizeof(lumi_status),
+        ok
+            ? "ASSET|UPLOADING|%u"
+            : "ASSET|ERROR",
+        (unsigned int)total);
+
+    if (from_usb) {
+        write_text_usb(
+            ok
+                ? "ASSETACK|BEGIN\r\n"
+                : "ASSETACK|ERROR\r\n");
+    }
+}
+
+static void handle_asset_chunk(char *save, bool from_usb) {
+    char *offset_s = strtok_r(NULL, "|", &save);
+    char *base64 = strtok_r(NULL, "|", &save);
+
+    if (!offset_s || !base64) {
+        snprintf(lumi_status, sizeof(lumi_status), "ASSET|ERROR");
+        if (from_usb) {
+            write_text_usb("ASSETACK|ERROR\r\n");
+        }
+        return;
+    }
+
+    size_t decoded_len = 0U;
+    int rc = base64_decode(
+        saver_chunk_tmp,
+        sizeof(saver_chunk_tmp),
+        &decoded_len,
+        (const uint8_t *)base64,
+        strlen(base64));
+
+    uint32_t offset =
+        (uint32_t)strtoul(offset_s, NULL, 10);
+
+    bool ok =
+        rc == 0 &&
+        decoded_len > 0U &&
+        lumi_ext_asset_chunk(
+            offset,
+            saver_chunk_tmp,
+            decoded_len);
+
+    snprintf(
+        lumi_status,
+        sizeof(lumi_status),
+        ok
+            ? "ASSET|UPLOADING|%u"
+            : "ASSET|ERROR",
+        (unsigned int)(offset + decoded_len));
+
+    if (from_usb) {
+        write_text_usb(
+            ok
+                ? "ASSETACK|CHUNK\r\n"
+                : "ASSETACK|ERROR\r\n");
+    }
+}
+
+static void handle_asset_end(bool from_usb) {
+    bool ok = lumi_ext_asset_end();
+    uint32_t size = ok
+        ? lumi_ext_asset_size()
+        : 0U;
+
+    snprintf(
+        lumi_status,
+        sizeof(lumi_status),
+        ok
+            ? "ASSET|READY|%u"
+            : "ASSET|ERROR",
+        (unsigned int)size);
+
+    if (from_usb) {
+        write_text_usb(
+            ok
+                ? "ASSETACK|READY\r\n"
+                : "ASSETACK|ERROR\r\n");
+    }
+}
+
+static void handle_asset_state(bool from_usb) {
+    bool valid = lumi_ext_asset_valid();
+    char response[48];
+
+    snprintf(
+        response,
+        sizeof(response),
+        valid
+            ? "ASSET|READY|%u"
+            : "ASSET|EMPTY",
+        (unsigned int)(valid ? lumi_ext_asset_size() : 0U));
+
+    if (from_usb) {
+        write_text_usb(response);
+        write_text_usb("\r\n");
+    } else {
+        snprintf(lumi_status, sizeof(lumi_status), "%s", response);
+    }
+}
+
 static void handle_line(char *line, bool from_usb) {
     char *save = NULL;
     char *root = strtok_r(line, "|", &save);
@@ -1330,7 +1472,7 @@ static void handle_line(char *line, bool from_usb) {
     if (strcmp(root, "HELLO") == 0) {
         if (from_usb) {
             write_text_usb(
-                LUMIPAD_HELLO_BASE "|CAPS=MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,HIBERNATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST\r\n");
+                LUMIPAD_HELLO_BASE "|CAPS=MEM,PANEL,LOG,SAVERSTATE,PROFILE,PROFILECAT,POWERSTATE,HIBERNATE,ACTION,ARTVAR,BAT,PCMON,MEDIAFAST,EXTFLASH,ASSETSTORE\r\n");
         }
     } else if (strcmp(root, "CAPS") == 0) {
         handle_caps(from_usb);
@@ -1348,6 +1490,22 @@ static void handle_line(char *line, bool from_usb) {
         handle_profile_info(save, from_usb);
     } else if (strcmp(root, "POWER") == 0) {
         handle_power_state(from_usb);
+    } else if (strcmp(root, "STORAGE") == 0) {
+        handle_storage_info(from_usb);
+    } else if (strcmp(root, "ASSETBEGIN") == 0) {
+        handle_asset_begin(save, from_usb);
+    } else if (strcmp(root, "ASSETCHUNK") == 0) {
+        handle_asset_chunk(save, from_usb);
+    } else if (strcmp(root, "ASSETEND") == 0) {
+        handle_asset_end(from_usb);
+    } else if (strcmp(root, "ASSETSTATE") == 0) {
+        handle_asset_state(from_usb);
+    } else if (strcmp(root, "ASSETCLEAR") == 0) {
+        lumi_ext_asset_clear();
+        snprintf(lumi_status, sizeof(lumi_status), "ASSET|EMPTY");
+        if (from_usb) {
+            write_text_usb("ASSETACK|EMPTY\r\n");
+        }
     } else if (strcmp(root, "PCCFG") == 0) {
         handle_pc_config(save);
     } else if (strcmp(root, "PCMON") == 0) {
@@ -1535,6 +1693,8 @@ static ssize_t read_lumi(struct bt_conn *conn, const struct bt_gatt_attr *attr,
         strncmp(lumi_status, "PROFILE|", 8) != 0 &&
         strncmp(lumi_status, "PROFILEINFO|", 12) != 0 &&
         strncmp(lumi_status, "POWER|", 6) != 0 &&
+        strncmp(lumi_status, "STORAGE|", 8) != 0 &&
+        strncmp(lumi_status, "ASSET|", 6) != 0 &&
         strncmp(lumi_status, "SAVERSTATE|", 11) != 0 &&
         strncmp(lumi_status, "CAPS|", 5) != 0 &&
         strncmp(lumi_status, "ACTION|", 7) != 0 &&
@@ -1555,6 +1715,8 @@ static ssize_t read_lumi(struct bt_conn *conn, const struct bt_gatt_attr *attr,
         strncmp(lumi_status, "PROFILE|", 8) == 0 ||
         strncmp(lumi_status, "PROFILEINFO|", 12) == 0 ||
         strncmp(lumi_status, "POWER|", 6) == 0 ||
+        strncmp(lumi_status, "STORAGE|", 8) == 0 ||
+        strncmp(lumi_status, "ASSET|", 6) == 0 ||
         strncmp(lumi_status, "SAVERSTATE|", 11) == 0 ||
         strncmp(lumi_status, "CAPS|", 5) == 0 ||
         strncmp(lumi_status, "ACTION|", 7) == 0) {
@@ -1601,6 +1763,13 @@ static void lumi_app_thread(void) {
     }
 
     lumi_diag_report('I', "Firmware diagnostics online");
+
+    bool ext_flash_ready = lumi_ext_storage_ready();
+    lumi_diag_report(
+        ext_flash_ready ? 'I' : 'E',
+        ext_flash_ready
+            ? "External flash ready: 10MiB GIF + 2MiB assets + 4MiB reserve"
+            : "External flash not ready");
 
     int64_t next_keymap_autosave_at =
         k_uptime_get() + KEYMAP_AUTOSAVE_INTERVAL_MS;

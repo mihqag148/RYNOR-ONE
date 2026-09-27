@@ -195,6 +195,30 @@
             low-power-enable;
         };
     };
+
+    /* Dedicated external W25Q128 bus.
+     * Completely separate from the ST7789 and WS2812 peripherals:
+     *   SCK  P1.07
+     *   MOSI P1.02
+     *   MISO P1.01
+     *   CS   P0.11
+     */
+    lumi_flash_spi_default: lumi_flash_spi_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 1, 7)>,
+                    <NRF_PSEL(SPIM_MOSI, 1, 2)>,
+                    <NRF_PSEL(SPIM_MISO, 1, 1)>;
+        };
+    };
+
+    lumi_flash_spi_sleep: lumi_flash_spi_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 1, 7)>,
+                    <NRF_PSEL(SPIM_MOSI, 1, 2)>,
+                    <NRF_PSEL(SPIM_MISO, 1, 1)>;
+            low-power-enable;
+        };
+    };
 };
 
 // ST7789 1.47 inch, physical panel 172x320, used in landscape as 320x172.
@@ -240,6 +264,60 @@
     };
 };
 
+/* External W25Q128JV (16 MiB / 128 Mbit) on a dedicated SPIM2 bus.
+ *
+ * Layout:
+ *   0x000000..0x9FFFFF  10 MiB GIF/screensaver media
+ *   0xA00000..0xBFFFFF   2 MiB icon/UI/animation assets
+ *   0xC00000..0xFFFFFF   4 MiB reserve/cache/update staging
+ *
+ * Firmware still executes from the nRF52840 internal flash; this external
+ * NOR is storage only.
+ */
+&spi2 {
+    compatible = "nordic,nrf-spim";
+    status = "okay";
+    pinctrl-0 = <&lumi_flash_spi_default>;
+    pinctrl-1 = <&lumi_flash_spi_sleep>;
+    pinctrl-names = "default", "sleep";
+    cs-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
+
+    lumi_ext_flash: w25q128@0 {
+        compatible = "jedec,spi-nor";
+        reg = <0>;
+        spi-max-frequency = <8000000>;
+        /* 128 Mbit / 16 MiB. SFDP is read at runtime so compatible
+         * W25Q128/GD25Q128-class parts can be used on this module.
+         */
+        size = <134217728>;
+        has-dpd;
+        t-enter-dpd = <3000>;
+        t-exit-dpd = <30000>;
+        status = "okay";
+
+        partitions {
+            compatible = "fixed-partitions";
+            #address-cells = <1>;
+            #size-cells = <1>;
+
+            lumi_saver_partition: partition@0 {
+                label = "lumi-gif";
+                reg = <0x000000 0xA00000>;
+            };
+
+            lumi_assets_partition: partition@a00000 {
+                label = "lumi-assets";
+                reg = <0xA00000 0x200000>;
+            };
+
+            lumi_reserve_partition: partition@c00000 {
+                label = "lumi-reserve";
+                reg = <0xC00000 0x400000>;
+            };
+        };
+    };
+};
+
 // Six WS2812B LEDs on P0.06. The SPI peripheral only generates the
 // WS2812 data waveform; there is no separate SCK wire to the LEDs.
 &spi3 {
@@ -278,21 +356,13 @@
 };
 
 
-/* Reserve internal flash for the custom screensaver.
- * Original code partition: 0x26000..0xEC000 (0xC6000 bytes).
- * Keep 0x70000 bytes (~448 KB) for firmware and use the remaining
- * 0x56000 bytes (~352 KB) for 25 RGB332 frames at 160x86.
+/* External W25Q128 now owns all media storage. Restore the full original
+ * nice!nano application partition (0x26000..0xEC000) to firmware. The
+ * nRF52840's internal 1 MiB remains dedicated to SoftDevice/firmware/NVS/
+ * bootloader according to the board partition map.
  */
 &code_partition {
-    reg = <0x26000 0x70000>;
-};
-
-&flash0 {
-    partitions {
-        lumi_saver_partition: partition@96000 {
-            reg = <0x96000 0x56000>;
-        };
-    };
+    reg = <0x26000 0xC6000>;
 };
 
 
