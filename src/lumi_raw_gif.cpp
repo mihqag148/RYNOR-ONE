@@ -1,13 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 
-#include <algorithm>
-#include <cstdint>
-#include <cstring>
+#include <stdint.h>
+#include <string.h>
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/display.h>
 #include <zephyr/storage/flash_map.h>
+#include <zephyr/sys/util.h>
 
 #include <lvgl.h>
 
@@ -92,7 +92,7 @@ int32_t gif_read(
         file->iSize - file->iPos;
 
     int32_t count =
-        std::min(length, remaining);
+        MIN(length, remaining);
 
     if (count <= 0) {
         return 0;
@@ -170,7 +170,7 @@ void compute_transform() {
         if (source_vs_target >= target_vs_source) {
             g_content_height = kDisplayHeight;
             g_content_width =
-                std::max(
+                MAX(
                     1,
                     static_cast<int>(
                         (static_cast<int64_t>(g_source_width) *
@@ -179,7 +179,7 @@ void compute_transform() {
         } else {
             g_content_width = kDisplayWidth;
             g_content_height =
-                std::max(
+                MAX(
                     1,
                     static_cast<int>(
                         (static_cast<int64_t>(g_source_height) *
@@ -190,7 +190,7 @@ void compute_transform() {
         if (source_vs_target >= target_vs_source) {
             g_content_width = kDisplayWidth;
             g_content_height =
-                std::max(
+                MAX(
                     1,
                     static_cast<int>(
                         (static_cast<int64_t>(g_source_height) *
@@ -199,7 +199,7 @@ void compute_transform() {
         } else {
             g_content_height = kDisplayHeight;
             g_content_width =
-                std::max(
+                MAX(
                     1,
                     static_cast<int>(
                         (static_cast<int64_t>(g_source_width) *
@@ -271,14 +271,14 @@ void gif_draw(GIFDRAW *draw) {
              g_content_height) /
             g_source_height);
 
-    dy0 = std::max(0, dy0);
-    dy1 = std::min(kDisplayHeight, dy1);
+    dy0 = MAX(0, dy0);
+    dy1 = MIN(kDisplayHeight, dy1);
 
     if (dy1 <= dy0) {
         return;
     }
 
-    std::memset(g_mask, 0, sizeof(g_mask));
+    memset(g_mask, 0, sizeof(g_mask));
 
     const uint8_t *pixels =
         draw->pPixels;
@@ -309,8 +309,8 @@ void gif_draw(GIFDRAW *draw) {
                  g_content_width) /
                 g_source_width);
 
-        dx0 = std::max(0, dx0);
-        dx1 = std::min(kDisplayWidth, dx1);
+        dx0 = MAX(0, dx0);
+        dx1 = MIN(kDisplayWidth, dx1);
 
         if (dx1 <= dx0) {
             continue;
@@ -515,7 +515,7 @@ extern "C" bool lumi_raw_gif_render_due(
             nullptr);
 
     delay_ms =
-        std::max(
+        MAX(
             static_cast<int>(kMinFrameDelayMs),
             delay_ms);
 
