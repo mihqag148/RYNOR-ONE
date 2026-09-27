@@ -20,6 +20,7 @@ namespace {
 constexpr uint32_t kGifDataOffset = 0x1000U;
 constexpr int kDisplayWidth = 320;
 constexpr int kDisplayHeight = 172;
+constexpr int kStripeRows = 8;
 constexpr uint32_t kMinFrameDelayMs = 10U;
 
 AnimatedGIF g_gif;
@@ -41,6 +42,19 @@ int g_offset_y;
 
 lv_color_t g_line[kDisplayWidth];
 uint8_t g_mask[kDisplayWidth];
+
+/*
+ * Native GIF fast path.
+ *
+ * The old renderer called display_write() for almost every LCD row. A
+ * 320x172 full-frame GIF therefore needed ~172 ST7789 transactions per frame,
+ * which is both slow and visibly scans from top to bottom. Keep only an
+ * 8-row stripe (5 KiB) in RAM and flush full-frame opaque GIFs in blocks.
+ * This avoids a 110 KiB framebuffer, which the nRF52840 cannot afford.
+ */
+lv_color_t g_stripe[kDisplayWidth * kStripeRows];
+int g_stripe_start_y = -1;
+int g_stripe_rows = 0;
 
 void close_area() {
     if (g_area) {
@@ -214,33 +228,116 @@ void compute_transform() {
         (kDisplayHeight - g_content_height) / 2;
 }
 
-void clear_display() {
-    if (!device_is_ready(g_display)) {
+void flush_stripe() {
+    if (g_stripe_rows <= 0 ||
+        g_stripe_start_y < 0 ||
+        !device_is_ready(g_display)) {
+        g_stripe_start_y = -1;
+        g_stripe_rows = 0;
         return;
-    }
-
-    lv_color_t black =
-        lv_color_make(0, 0, 0);
-
-    for (int x = 0; x < kDisplayWidth; ++x) {
-        g_line[x] = black;
     }
 
     struct display_buffer_descriptor desc = {};
     desc.buf_size =
         static_cast<size_t>(kDisplayWidth) *
+        static_cast<size_t>(g_stripe_rows) *
         sizeof(lv_color_t);
     desc.width = kDisplayWidth;
-    desc.height = 1U;
+    desc.height =
+        static_cast<uint16_t>(g_stripe_rows);
     desc.pitch = kDisplayWidth;
 
-    for (int y = 0; y < kDisplayHeight; ++y) {
+    (void)display_write(
+        g_display,
+        0,
+        static_cast<uint16_t>(g_stripe_start_y),
+        &desc,
+        g_stripe);
+
+    g_stripe_start_y = -1;
+    g_stripe_rows = 0;
+}
+
+void append_full_width_row(
+    int y,
+    const lv_color_t *row) {
+
+    if (!row ||
+        y < 0 ||
+        y >= kDisplayHeight) {
+        return;
+    }
+
+    if (g_stripe_rows <= 0) {
+        g_stripe_start_y = y;
+    }
+
+    int expected_y =
+        g_stripe_start_y +
+        g_stripe_rows;
+
+    if (y != expected_y ||
+        g_stripe_rows >= kStripeRows) {
+        flush_stripe();
+        g_stripe_start_y = y;
+    }
+
+    memcpy(
+        &g_stripe[
+            g_stripe_rows *
+            kDisplayWidth],
+        row,
+        sizeof(lv_color_t) *
+            kDisplayWidth);
+
+    g_stripe_rows++;
+
+    if (g_stripe_rows >= kStripeRows) {
+        flush_stripe();
+    }
+}
+
+void clear_display() {
+    if (!device_is_ready(g_display)) {
+        return;
+    }
+
+    flush_stripe();
+
+    lv_color_t black =
+        lv_color_make(0, 0, 0);
+
+    for (int i = 0;
+         i < kDisplayWidth * kStripeRows;
+         ++i) {
+        g_stripe[i] = black;
+    }
+
+    for (int y = 0;
+         y < kDisplayHeight;
+         y += kStripeRows) {
+
+        int rows =
+            MIN(
+                kStripeRows,
+                kDisplayHeight - y);
+
+        struct display_buffer_descriptor desc = {};
+        desc.buf_size =
+            static_cast<size_t>(kDisplayWidth) *
+            static_cast<size_t>(rows) *
+            sizeof(lv_color_t);
+        desc.width = kDisplayWidth;
+        desc.height =
+            static_cast<uint16_t>(rows);
+        desc.pitch = kDisplayWidth;
+
         (void)display_write(
             g_display,
             0,
-            y,
+            static_cast<uint16_t>(y),
             &desc,
-            g_line);
+            g_stripe);
     }
 }
 
@@ -287,6 +384,31 @@ void gif_draw(GIFDRAW *draw) {
 
     bool has_transparency =
         draw->ucHasTransparency != 0U;
+
+    bool full_frame_opaque =
+        !has_transparency &&
+        draw->iX == 0 &&
+        draw->iY == 0 &&
+        draw->iWidth == g_source_width &&
+        draw->iHeight == g_source_height;
+
+    if (full_frame_opaque) {
+        lv_color_t black =
+            lv_color_make(0, 0, 0);
+
+        for (int x = 0;
+             x < kDisplayWidth;
+             ++x) {
+            g_line[x] = black;
+        }
+    } else {
+        /*
+         * A partial/translucent GIF frame depends on pixels already present
+         * on the LCD. Flush any pending opaque stripe before falling back to
+         * the precise run writer below.
+         */
+        flush_stripe();
+    }
 
     for (int local_x = 0;
          local_x < draw->iWidth;
@@ -339,6 +461,20 @@ void gif_draw(GIFDRAW *draw) {
             g_line[x] = color;
             g_mask[x] = 1U;
         }
+    }
+
+    if (full_frame_opaque) {
+        for (int y = dy0; y < dy1; ++y) {
+            append_full_width_row(
+                y,
+                g_line);
+        }
+
+        if (draw->y >=
+            draw->iHeight - 1) {
+            flush_stripe();
+        }
+        return;
     }
 
     for (int y = dy0; y < dy1; ++y) {
@@ -482,6 +618,8 @@ extern "C" void lumi_raw_gif_reset_playback(void) {
 }
 
 extern "C" void lumi_raw_gif_stop(void) {
+    flush_stripe();
+
     if (g_opened) {
         g_gif.close();
     } else {
