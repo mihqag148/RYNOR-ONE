@@ -84,7 +84,11 @@ static bool saver_rgb332_lut_ready;
  */
 #define SAVER_FLASH_PARTITION_BYTES 0xA00000U
 #define SAVER_FLASH_DATA_OFFSET 0x1000U
-#define SAVER_FLASH_PAGE_SIZE 0x1000U
+/* W25Q128 supports 64 KiB block erase. Track/erase in 64 KiB blocks while
+ * retaining a 4 KiB metadata offset inside block 0. This cuts large GIF upload
+ * erase overhead dramatically compared with 2560 individual 4 KiB sectors.
+ */
+#define SAVER_FLASH_PAGE_SIZE 0x10000U
 #define SAVER_PACKED_MAX_BYTES \
     (SAVER_FLASH_PARTITION_BYTES - SAVER_FLASH_DATA_OFFSET)
 #define SAVER_FLASH_MAX_PAGES \
