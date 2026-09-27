@@ -81,4 +81,5 @@ bool lumi_ui_saver_image_chunk(uint32_t offset,
 bool lumi_ui_saver_image_end(void);
 
 bool lumi_ui_saver_anim_is_valid(void);
+uint32_t lumi_ui_saver_storage_used(void);
 void lumi_ui_saver_anim_clear(void);
