@@ -48,7 +48,7 @@ static size_t ble_len;
 
 static uint8_t bitmap_tmp[BITMAP_TMP_MAX];
 static uint8_t artwork_tmp[LUMI_ARTWORK_BYTES];
-static uint8_t saver_chunk_tmp[256];
+static uint8_t saver_chunk_tmp[768];
 
 static char text_upload_kind;
 static uint16_t text_upload_width;
