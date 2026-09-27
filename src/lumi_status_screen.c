@@ -33,6 +33,7 @@
 #include <zmk/usb.h>
 #include "lumi_panel.h"
 #include "lumi_battery.h"
+#include "lumi_raw_gif.h"
 #include "lumi_now_playing.h"
 #include "lumi_rgb.h"
 #include "lumi_ui_config.h"
@@ -77,6 +78,7 @@ static bool saver_rgb332_lut_ready;
 #define SAVER_FORMAT_RGB332 0U
 #define SAVER_FORMAT_RGB565_STATIC 1U
 #define SAVER_FORMAT_RYQ1 2U
+#define SAVER_FORMAT_RAW_GIF 3U
 #define SAVER_PACKED_MODE_RGB565 0U
 #define SAVER_PACKED_MODE_RGB332 1U
 #define SAVER_PACKED_FLAGS 0x03U
@@ -139,6 +141,12 @@ static uint32_t saver_image_received_bytes;
 static uint32_t saver_packed_expected_bytes;
 static uint32_t saver_packed_received_bytes;
 static uint32_t saver_packed_data_size;
+static uint32_t saver_raw_gif_expected_bytes;
+static uint32_t saver_raw_gif_received_bytes;
+static uint32_t saver_raw_gif_data_size;
+static uint16_t saver_raw_gif_source_width;
+static uint16_t saver_raw_gif_source_height;
+static uint8_t saver_raw_gif_scale_mode;
 static uint16_t saver_packed_storage_width;
 static uint16_t saver_packed_storage_height;
 static uint16_t saver_packed_frame_count;
