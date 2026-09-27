@@ -116,6 +116,8 @@ uint8_t g_rgb444_stripe[kRgb444BytesPerRow * kStripeRows];
 int g_rgb444_start_y = -1;
 int g_rgb444_rows = 0;
 
+void flush_stripe();
+
 #if defined(CONFIG_SPI)
 const struct spi_dt_spec g_panel_spi =
     SPI_DT_SPEC_GET(
