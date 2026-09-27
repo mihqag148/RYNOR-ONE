@@ -19,9 +19,16 @@ if(CONFIG_ZMK_DISPLAY_STATUS_SCREEN_CUSTOM)
     ${CMAKE_CURRENT_LIST_DIR}/src/lumi_status_screen.c
     ${CMAKE_CURRENT_LIST_DIR}/src/lumi_battery.c
     ${CMAKE_CURRENT_LIST_DIR}/src/lumi_ext_storage.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/lumi_raw_gif.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/AnimatedGIF/AnimatedGIF.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/lumi_rgb.c
     ${CMAKE_CURRENT_LIST_DIR}/src/lumi_action.c
     ${CMAKE_CURRENT_LIST_DIR}/src/lumi_now_playing.c
     ${CMAKE_CURRENT_LIST_DIR}/src/lumi_app_link.c
   )
 endif()
+
+
+target_include_directories(app PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/AnimatedGIF
+)
