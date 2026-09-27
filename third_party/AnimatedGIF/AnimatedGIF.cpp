@@ -20,6 +20,11 @@
 //===========================================================================
 #include "AnimatedGIF.h"
 
+// nRF52840 is Cortex-M4 and does not implement Arm NEON. The upstream
+// architecture check treats ARMv7-M as NEON-capable, so force the portable
+// decoder path for this target.
+#define NO_SIMD 1
+
 // Here is all of the actual code...
 #include "gif.inl"
 
