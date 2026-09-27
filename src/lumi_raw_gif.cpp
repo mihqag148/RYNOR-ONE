@@ -6,6 +6,11 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/kernel.h>
+#if defined(CONFIG_SPI)
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/spi.h>
+#endif
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/util.h>
 
@@ -22,7 +27,35 @@ constexpr int kDisplayWidth = 320;
 constexpr int kDisplayHeight = 172;
 constexpr int kStripeRows = 8;
 constexpr uint32_t kMinFrameDelayMs = 10U;
-constexpr uint32_t kPresentIntervalMs = 40U; /* physical LCD budget: 25 FPS */
+constexpr uint32_t kPresentIntervalMs = 40U; /* panel is synchronized near 25 FPS */
+constexpr uint32_t kPanelLeadMs = 8U;
+constexpr size_t kRgb444BytesPerRow =
+    static_cast<size_t>(kDisplayWidth) * 3U / 2U;
+
+/* ST7789 command subset used only by the raw-GIF fast path. */
+constexpr uint8_t kCmdCaseT = 0x2AU;
+constexpr uint8_t kCmdRaseT = 0x2BU;
+constexpr uint8_t kCmdRamWr = 0x2CU;
+constexpr uint8_t kCmdColMod = 0x3AU;
+constexpr uint8_t kCmdPorCtrl = 0xB2U;
+constexpr uint8_t kCmdFrCtrl2 = 0xC6U;
+
+/*
+ * Default Zephyr init is 60 Hz with 12/12 front/back porches.
+ * During native full-frame GIF playback use RTNA=31 and 108/108 porches:
+ *
+ * 10 MHz / ((320 + 108 + 108) * (250 + 31*16)) ~= 25.0 Hz.
+ *
+ * Matching the panel scan to the 25 FPS presentation budget, then starting
+ * each transfer a few milliseconds after the scan begins, keeps the writer
+ * behind the visible scan instead of letting a tear line walk down the LCD.
+ */
+constexpr uint8_t kGifPorch[5] = {0x6C, 0x6C, 0x00, 0x33, 0x33};
+constexpr uint8_t kUiPorch[5] = {0x0C, 0x0C, 0x00, 0x33, 0x33};
+constexpr uint8_t kGifFrameRate = 0x1FU;
+constexpr uint8_t kUiFrameRate = 0x0FU;
+constexpr uint8_t kRgb444ColMod = 0x03U;
+constexpr uint8_t kRgb565ColMod = 0x05U;
 
 /* A requested slave frequency does not override an SPIM instance's limit. */
 BUILD_ASSERT(DT_PROP(DT_BUS(DT_CHOSEN(zephyr_display)), max_frequency) >=
@@ -42,6 +75,11 @@ uint32_t g_next_frame_at;
 uint32_t g_next_present_at;
 bool g_suppress_opaque_output;
 bool g_frame_forced_present;
+bool g_fast_panel_mode;
+bool g_fast_path_allowed;
+bool g_fast_mode_just_entered;
+uint32_t g_render_now_ms;
+uint32_t g_panel_epoch_ms;
 int g_source_width;
 int g_source_height;
 int g_content_width;
@@ -73,6 +111,112 @@ int32_t g_cache_size;
 lv_color_t g_stripe[kDisplayWidth * kStripeRows];
 int g_stripe_start_y = -1;
 int g_stripe_rows = 0;
+
+uint8_t g_rgb444_stripe[kRgb444BytesPerRow * kStripeRows];
+int g_rgb444_start_y = -1;
+int g_rgb444_rows = 0;
+
+void flush_stripe();
+
+#if defined(CONFIG_SPI)
+const struct spi_dt_spec g_panel_spi =
+    SPI_DT_SPEC_GET(
+        DT_CHOSEN(zephyr_display),
+        SPI_OP_MODE_MASTER | SPI_WORD_SET(8),
+        0);
+const struct gpio_dt_spec g_panel_dc =
+    GPIO_DT_SPEC_GET(
+        DT_CHOSEN(zephyr_display),
+        cmd_data_gpios);
+
+constexpr uint16_t kPanelXOffset =
+    DT_PROP(DT_CHOSEN(zephyr_display), x_offset);
+constexpr uint16_t kPanelYOffset =
+    DT_PROP(DT_CHOSEN(zephyr_display), y_offset);
+
+bool panel_command(
+    uint8_t command,
+    const uint8_t *data = nullptr,
+    size_t length = 0U) {
+
+    if (!spi_is_ready_dt(&g_panel_spi) ||
+        !gpio_is_ready_dt(&g_panel_dc)) {
+        return false;
+    }
+
+    struct spi_buf command_buffer = {};
+    command_buffer.buf = &command;
+    command_buffer.len = 1U;
+
+    struct spi_buf_set command_set = {};
+    command_set.buffers = &command_buffer;
+    command_set.count = 1U;
+
+    /* cmd-data-gpios is active-low: logical 1 drives D/C low (command). */
+    if (gpio_pin_set_dt(&g_panel_dc, 1) != 0 ||
+        spi_write_dt(&g_panel_spi, &command_set) != 0) {
+        return false;
+    }
+
+    if (!data || length == 0U) {
+        return true;
+    }
+
+    struct spi_buf data_buffer = {};
+    data_buffer.buf =
+        const_cast<uint8_t *>(data);
+    data_buffer.len = length;
+
+    struct spi_buf_set data_set = {};
+    data_set.buffers = &data_buffer;
+    data_set.count = 1U;
+
+    /* logical 0 drives D/C high (pixel/parameter data). */
+    return gpio_pin_set_dt(&g_panel_dc, 0) == 0 &&
+           spi_write_dt(&g_panel_spi, &data_set) == 0;
+}
+
+bool panel_set_window(
+    uint16_t x,
+    uint16_t y,
+    uint16_t width,
+    uint16_t height) {
+
+    if (width == 0U || height == 0U) {
+        return false;
+    }
+
+    uint16_t x0 = x + kPanelXOffset;
+    uint16_t y0 = y + kPanelYOffset;
+    uint16_t x1 = x0 + width - 1U;
+    uint16_t y1 = y0 + height - 1U;
+
+    uint8_t columns[4] = {
+        static_cast<uint8_t>(x0 >> 8),
+        static_cast<uint8_t>(x0),
+        static_cast<uint8_t>(x1 >> 8),
+        static_cast<uint8_t>(x1),
+    };
+    uint8_t rows[4] = {
+        static_cast<uint8_t>(y0 >> 8),
+        static_cast<uint8_t>(y0),
+        static_cast<uint8_t>(y1 >> 8),
+        static_cast<uint8_t>(y1),
+    };
+
+    return panel_command(kCmdCaseT, columns, sizeof(columns)) &&
+           panel_command(kCmdRaseT, rows, sizeof(rows));
+}
+
+bool panel_fast_path_available() {
+    return spi_is_ready_dt(&g_panel_spi) &&
+           gpio_is_ready_dt(&g_panel_dc);
+}
+#else
+bool panel_fast_path_available() {
+    return false;
+}
+#endif
 
 void close_area() {
     g_cache_size = 0;
@@ -255,6 +399,225 @@ void compute_transform() {
         (kDisplayWidth - g_content_width) / 2;
     g_offset_y =
         (kDisplayHeight - g_content_height) / 2;
+}
+
+
+uint16_t palette_be_to_rgb565(
+    uint16_t value) {
+    return static_cast<uint16_t>(
+        (value >> 8) |
+        (value << 8));
+}
+
+void flush_rgb444_stripe() {
+    if (g_rgb444_rows <= 0 ||
+        g_rgb444_start_y < 0) {
+        g_rgb444_start_y = -1;
+        g_rgb444_rows = 0;
+        return;
+    }
+
+#if defined(CONFIG_SPI)
+    if (g_fast_panel_mode &&
+        panel_set_window(
+            0U,
+            static_cast<uint16_t>(g_rgb444_start_y),
+            kDisplayWidth,
+            static_cast<uint16_t>(g_rgb444_rows))) {
+
+        size_t bytes =
+            kRgb444BytesPerRow *
+            static_cast<size_t>(g_rgb444_rows);
+
+        if (!panel_command(
+                kCmdRamWr,
+                g_rgb444_stripe,
+                bytes)) {
+            lumi_diag_report(
+                'E',
+                "Raw GIF RGB444 SPI write failed");
+        }
+    }
+#endif
+
+    g_rgb444_start_y = -1;
+    g_rgb444_rows = 0;
+}
+
+void leave_fast_panel_mode() {
+    flush_rgb444_stripe();
+
+    if (!g_fast_panel_mode) {
+        return;
+    }
+
+#if defined(CONFIG_SPI)
+    /*
+     * Hide the pixel-format transition. The ST7789 retains GRAM contents
+     * while DISP_OFF is active.
+     */
+    (void)display_blanking_on(g_display);
+
+    (void)panel_command(
+        kCmdColMod,
+        &kRgb565ColMod,
+        1U);
+    (void)panel_command(
+        kCmdPorCtrl,
+        kUiPorch,
+        sizeof(kUiPorch));
+    (void)panel_command(
+        kCmdFrCtrl2,
+        &kUiFrameRate,
+        1U);
+
+    (void)display_blanking_off(g_display);
+#endif
+
+    g_fast_panel_mode = false;
+}
+
+bool enter_fast_panel_mode() {
+    if (g_fast_panel_mode) {
+        return true;
+    }
+
+    if (!g_fast_path_allowed ||
+        !panel_fast_path_available()) {
+        return false;
+    }
+
+    flush_stripe();
+
+#if defined(CONFIG_SPI)
+    (void)display_blanking_on(g_display);
+
+    bool ok =
+        panel_command(
+            kCmdPorCtrl,
+            kGifPorch,
+            sizeof(kGifPorch)) &&
+        panel_command(
+            kCmdFrCtrl2,
+            &kGifFrameRate,
+            1U) &&
+        panel_command(
+            kCmdColMod,
+            &kRgb444ColMod,
+            1U);
+
+    (void)display_blanking_off(g_display);
+
+    if (!ok) {
+        g_fast_path_allowed = false;
+        return false;
+    }
+
+    g_fast_panel_mode = true;
+    g_fast_mode_just_entered = true;
+    g_panel_epoch_ms = g_render_now_ms;
+    g_next_present_at =
+        g_panel_epoch_ms +
+        kPanelLeadMs;
+
+    /*
+     * Give the freshly restarted scan a small head start. RGB444 transfers
+     * are ~20.6 ms at 32 MHz, leaving enough room inside the ~40 ms panel
+     * frame for the writer to remain behind the visible scan.
+     */
+    k_sleep(K_MSEC(kPanelLeadMs));
+    return true;
+#else
+    return false;
+#endif
+}
+
+void append_rgb444_row(
+    int y,
+    const uint8_t *pixels,
+    const uint16_t *palette) {
+
+    if (!pixels ||
+        !palette ||
+        y < 0 ||
+        y >= kDisplayHeight ||
+        !g_fast_panel_mode) {
+        return;
+    }
+
+    if (g_rgb444_rows <= 0) {
+        g_rgb444_start_y = y;
+    }
+
+    int expected_y =
+        g_rgb444_start_y +
+        g_rgb444_rows;
+
+    if (y != expected_y ||
+        g_rgb444_rows >= kStripeRows) {
+        flush_rgb444_stripe();
+        g_rgb444_start_y = y;
+    }
+
+    uint8_t *out =
+        &g_rgb444_stripe[
+            static_cast<size_t>(g_rgb444_rows) *
+            kRgb444BytesPerRow];
+
+    for (int x = 0;
+         x < kDisplayWidth;
+         x += 2) {
+
+        uint16_t c0 =
+            palette_be_to_rgb565(
+                palette[pixels[x]]);
+        uint16_t c1 =
+            palette_be_to_rgb565(
+                palette[pixels[x + 1]]);
+
+        uint8_t r0 =
+            static_cast<uint8_t>(
+                (c0 >> 12) & 0x0FU);
+        uint8_t g0 =
+            static_cast<uint8_t>(
+                (c0 >> 7) & 0x0FU);
+        uint8_t b0 =
+            static_cast<uint8_t>(
+                (c0 >> 1) & 0x0FU);
+
+        uint8_t r1 =
+            static_cast<uint8_t>(
+                (c1 >> 12) & 0x0FU);
+        uint8_t g1 =
+            static_cast<uint8_t>(
+                (c1 >> 7) & 0x0FU);
+        uint8_t b1 =
+            static_cast<uint8_t>(
+                (c1 >> 1) & 0x0FU);
+
+        size_t offset =
+            static_cast<size_t>(x / 2) *
+            3U;
+
+        out[offset] =
+            static_cast<uint8_t>(
+                (r0 << 4) |
+                g0);
+        out[offset + 1U] =
+            static_cast<uint8_t>(
+                (b0 << 4) |
+                r1);
+        out[offset + 2U] =
+            static_cast<uint8_t>(
+                (g1 << 4) |
+                b1);
+    }
+
+    g_rgb444_rows++;
+
+    if (g_rgb444_rows >= kStripeRows) {
+        flush_rgb444_stripe();
+    }
 }
 
 void flush_stripe() {
@@ -447,12 +810,29 @@ void gif_draw(GIFDRAW *draw) {
         g_source_width == kDisplayWidth &&
         g_source_height == kDisplayHeight &&
         g_content_width == kDisplayWidth &&
-        g_content_height == kDisplayHeight) {
-        for (int x = 0; x < kDisplayWidth; ++x) {
-            g_line[x].full = palette[pixels[x]];
-        }
-        append_full_width_row(source_y, g_line);
+        g_content_height == kDisplayHeight &&
+        enter_fast_panel_mode()) {
+
+        append_rgb444_row(
+            source_y,
+            pixels,
+            palette);
         return;
+    }
+
+    /*
+     * Any scaled, transparent or partial-frame GIF needs RGB565 run writes
+     * so unchanged pixels remain intact. Once an asset needs this path, keep
+     * it here for the rest of the playback loop instead of repeatedly
+     * switching panel pixel formats.
+     */
+    if (!full_frame_opaque ||
+        g_source_width != kDisplayWidth ||
+        g_source_height != kDisplayHeight ||
+        g_content_width != kDisplayWidth ||
+        g_content_height != kDisplayHeight) {
+        g_fast_path_allowed = false;
+        leave_fast_panel_mode();
     }
 
     if (full_frame_opaque) {
@@ -629,6 +1009,7 @@ bool open_decoder() {
     }
 
     compute_transform();
+    g_fast_path_allowed = true;
     g_opened = true;
     return true;
 }
@@ -681,10 +1062,14 @@ extern "C" void lumi_raw_gif_reset_playback(void) {
     g_next_present_at = 0U;
     g_suppress_opaque_output = false;
     g_frame_forced_present = false;
+    g_fast_mode_just_entered = false;
+    g_panel_epoch_ms = 0U;
 }
 
 extern "C" void lumi_raw_gif_stop(void) {
     flush_stripe();
+    flush_rgb444_stripe();
+    leave_fast_panel_mode();
 
     if (g_opened) {
         g_gif.close();
@@ -721,6 +1106,8 @@ extern "C" bool lumi_raw_gif_render_due(
 
     int delay_ms = 0;
 
+    g_render_now_ms = now_ms;
+    g_fast_mode_just_entered = false;
     g_suppress_opaque_output =
         (int32_t)(now_ms - g_next_present_at) < 0;
     g_frame_forced_present = false;
@@ -735,6 +1122,8 @@ extern "C" bool lumi_raw_gif_render_due(
         lumi_diag_report('E', "Raw GIF decode error=%d", g_gif.getLastError());
         g_stripe_rows = 0;
         g_stripe_start_y = -1;
+        g_rgb444_rows = 0;
+        g_rgb444_start_y = -1;
         lumi_raw_gif_stop();
         return false;
     }
@@ -743,12 +1132,29 @@ extern "C" bool lumi_raw_gif_render_due(
      * order). Commit that tail before returning to LVGL or resetting GIF.
      */
     flush_stripe();
+    flush_rgb444_stripe();
 
     if (!g_suppress_opaque_output ||
         g_frame_forced_present) {
-        g_next_present_at =
-            now_ms +
-            kPresentIntervalMs;
+
+        if (g_fast_panel_mode) {
+            uint32_t reference =
+                now_ms +
+                (g_fast_mode_just_entered
+                    ? kPanelLeadMs
+                    : 0U);
+
+            while ((int32_t)(
+                       reference -
+                       g_next_present_at) >= 0) {
+                g_next_present_at +=
+                    kPresentIntervalMs;
+            }
+        } else {
+            g_next_present_at =
+                now_ms +
+                kPresentIntervalMs;
+        }
     }
 
     delay_ms =
@@ -763,6 +1169,11 @@ extern "C" bool lumi_raw_gif_render_due(
      */
     g_next_frame_at +=
         static_cast<uint32_t>(delay_ms);
+
+    if (g_fast_mode_just_entered) {
+        g_next_frame_at +=
+            kPanelLeadMs;
+    }
 
     if ((int32_t)(now_ms - g_next_frame_at) >= 0) {
         g_next_frame_at = now_ms;
