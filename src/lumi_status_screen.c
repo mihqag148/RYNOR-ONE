@@ -2722,7 +2722,8 @@ static void refresh_screensaver(lv_timer_t *timer) {
      */
     lv_timer_set_period(
         timer,
-        saver_media_format == SAVER_FORMAT_RYQ1
+        (saver_media_format == SAVER_FORMAT_RYQ1 ||
+         saver_media_format == SAVER_FORMAT_RAW_GIF)
             ? SAVER_PACKED_MIN_FRAME_MS
             : SAVER_MIN_FRAME_MS);
 
@@ -2814,6 +2815,9 @@ static void refresh_screensaver(lv_timer_t *timer) {
 
     if (should_show_pc && screensaver_visible) {
         screensaver_visible = false;
+        if (saver_media_format == SAVER_FORMAT_RAW_GIF) {
+            lumi_raw_gif_stop();
+        }
         lv_disp_enable_invalidation(NULL, true);
         if (root_screen) {
             lv_obj_invalidate(root_screen);
@@ -2840,12 +2844,19 @@ static void refresh_screensaver(lv_timer_t *timer) {
             saver_packed_restart_playback();
             (void)saver_packed_decode_next_frame(
                 saver_media_epoch_ms);
+        } else if (saver_media_format == SAVER_FORMAT_RAW_GIF) {
+            lumi_raw_gif_reset_playback();
+            (void)lumi_raw_gif_render_due(
+                saver_media_epoch_ms);
         } else {
             draw_custom_saver_frame(0U, 0U);
         }
     } else if (!should_show && screensaver_visible) {
         screensaver_visible = false;
         saver_packed_playback_started = false;
+        if (saver_media_format == SAVER_FORMAT_RAW_GIF) {
+            lumi_raw_gif_stop();
+        }
 
         /* Hand display ownership back to LVGL and force one clean redraw of
          * the normal UI after direct GIF rendering stops.
@@ -2893,6 +2904,12 @@ static void refresh_screensaver(lv_timer_t *timer) {
         }
         return;
     }
+
+    if (saver_media_format == SAVER_FORMAT_RAW_GIF) {
+        (void)lumi_raw_gif_render_due(lv_now);
+        return;
+    }
+
     uint32_t elapsed = (uint32_t)(lv_now - saver_media_epoch_ms);
     uint32_t loop_ms = MAX(saver_media_loop_ms, 1U);
     uint32_t loop_pos = elapsed % loop_ms;
