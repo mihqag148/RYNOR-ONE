@@ -1103,7 +1103,7 @@ static void handle_txt(char *save) {
 
 static void handle_mem(bool from_usb) {
     size_t flash_used = (size_t)_flash_used;
-    size_t flash_total = DT_REG_SIZE(DT_NODELABEL(code_partition));
+    size_t flash_total = DT_REG_SIZE(DT_NODELABEL(flash0));
     size_t ram_used = (size_t)(_image_ram_end - _image_ram_start);
     size_t ram_total = DT_REG_SIZE(DT_NODELABEL(sram0));
 
