@@ -2004,6 +2004,8 @@ static int saver_flash_erase_page(uint32_t page) {
 }
 
 static int saver_flash_prepare_upload(void) {
+    lumi_raw_gif_stop();
+
     int rc = saver_flash_open_once();
     if (rc != 0) {
         return rc;
@@ -3149,6 +3151,125 @@ bool lumi_ui_saver_packed_end(void) {
     return ok;
 }
 
+bool lumi_ui_saver_gif_begin(
+    size_t total_bytes,
+    uint8_t scale_mode) {
+
+    if (total_bytes < 13U ||
+        total_bytes > SAVER_PACKED_MAX_BYTES ||
+        scale_mode > 5U) {
+        return false;
+    }
+
+    k_mutex_lock(&lumi_ui_config_lock, K_FOREVER);
+    saver_media_valid = false;
+    saver_media_format = SAVER_FORMAT_RAW_GIF;
+    saver_media_frame_count = 1U;
+    saver_media_received_mask = 0U;
+    saver_image_received_bytes = 0U;
+    saver_packed_reset_state();
+    saver_raw_gif_expected_bytes = (uint32_t)total_bytes;
+    saver_raw_gif_received_bytes = 0U;
+    saver_raw_gif_data_size = 0U;
+    saver_raw_gif_source_width = 0U;
+    saver_raw_gif_source_height = 0U;
+    saver_raw_gif_scale_mode = scale_mode;
+    saver_static_drawn = false;
+    saver_prefetch_valid = false;
+    saver_prefetch_next_valid = false;
+    k_mutex_unlock(&lumi_ui_config_lock);
+
+    if (saver_flash_prepare_upload() != 0) {
+        saver_raw_gif_expected_bytes = 0U;
+        return false;
+    }
+
+    return true;
+}
+
+bool lumi_ui_saver_gif_chunk(
+    uint32_t offset,
+    const uint8_t *data,
+    size_t len) {
+
+    if (!data ||
+        saver_media_format != SAVER_FORMAT_RAW_GIF ||
+        saver_raw_gif_expected_bytes < 13U ||
+        len == 0U ||
+        offset != saver_raw_gif_received_bytes ||
+        (uint64_t)offset + len >
+            saver_raw_gif_expected_bytes) {
+        return false;
+    }
+
+    if (saver_flash_write_bytes(
+            offset,
+            data,
+            len) != 0) {
+        return false;
+    }
+
+    saver_raw_gif_received_bytes +=
+        (uint32_t)len;
+
+    return true;
+}
+
+bool lumi_ui_saver_gif_end(void) {
+    bool ok =
+        saver_media_format == SAVER_FORMAT_RAW_GIF &&
+        saver_raw_gif_expected_bytes >= 13U &&
+        saver_raw_gif_received_bytes ==
+            saver_raw_gif_expected_bytes;
+
+    uint16_t width = 0U;
+    uint16_t height = 0U;
+
+    if (ok) {
+        ok = lumi_raw_gif_validate(
+            saver_raw_gif_expected_bytes,
+            saver_raw_gif_scale_mode,
+            &width,
+            &height);
+    }
+
+    if (ok) {
+        saver_raw_gif_data_size =
+            saver_raw_gif_expected_bytes;
+        saver_raw_gif_source_width = width;
+        saver_raw_gif_source_height = height;
+
+        lumi_raw_gif_configure(
+            saver_raw_gif_data_size,
+            saver_raw_gif_scale_mode);
+
+        ok = saver_flash_commit_header() == 0;
+    }
+
+    if (ok) {
+        saver_media_valid = true;
+        saver_media_frame_count = 1U;
+        saver_media_index = 0U;
+        saver_media_epoch_ms = 0U;
+        saver_prefetch_valid = false;
+        saver_prefetch_next_valid = false;
+        saver_static_drawn = false;
+
+        lumi_diag_report(
+            'I',
+            "Raw GIF ready bytes=%u src=%ux%u scale=%u",
+            (unsigned int)saver_raw_gif_data_size,
+            (unsigned int)saver_raw_gif_source_width,
+            (unsigned int)saver_raw_gif_source_height,
+            (unsigned int)saver_raw_gif_scale_mode);
+    } else {
+        saver_media_valid = false;
+        lumi_raw_gif_stop();
+    }
+
+    return ok;
+}
+
 bool lumi_ui_saver_image_begin(size_t total_bytes) {
     if (total_bytes != LUMI_SAVER_IMAGE_BYTES) {
         return false;
@@ -3224,12 +3345,19 @@ bool lumi_ui_saver_anim_is_valid(void) {
 }
 
 void lumi_ui_saver_anim_clear(void) {
+    lumi_raw_gif_stop();
     saver_flash_invalidate();
     saver_media_frame_count = 0U;
     saver_media_received_mask = 0U;
     saver_image_received_bytes = 0U;
     saver_media_format = SAVER_FORMAT_RGB332;
     saver_packed_reset_state();
+    saver_raw_gif_expected_bytes = 0U;
+    saver_raw_gif_received_bytes = 0U;
+    saver_raw_gif_data_size = 0U;
+    saver_raw_gif_source_width = 0U;
+    saver_raw_gif_source_height = 0U;
+    saver_raw_gif_scale_mode = 0U;
     memset(saver_media_received_bytes, 0, sizeof(saver_media_received_bytes));
     saver_media_index = 0U;
     saver_prefetch_valid = false;
