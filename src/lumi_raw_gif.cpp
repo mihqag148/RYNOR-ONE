@@ -393,7 +393,13 @@ bool open_decoder() {
         g_opened = false;
     }
 
-    g_gif.begin(GIF_PALETTE_RGB565_LE);
+    /*
+     * RYNOR ONE builds LVGL with CONFIG_LV_COLOR_16_SWAP=y. display_write()
+     * therefore expects the same byte-swapped RGB565 representation used by
+     * the rest of the LVGL buffers. AnimatedGIF's BE palette produces exactly
+     * that representation on the little-endian nRF52840.
+     */
+    g_gif.begin(GIF_PALETTE_RGB565_BE);
 
     int rc =
         g_gif.open(
@@ -519,9 +525,17 @@ extern "C" bool lumi_raw_gif_render_due(
             static_cast<int>(kMinFrameDelayMs),
             delay_ms);
 
-    g_next_frame_at =
-        now_ms +
+    /*
+     * Advance from the previous presentation deadline, not from the time the
+     * decode finished. Otherwise decode/SPI time is added to every GIF delay
+     * and a nominal 25/50/100 FPS asset progressively plays much slower.
+     */
+    g_next_frame_at +=
         static_cast<uint32_t>(delay_ms);
+
+    if ((int32_t)(now_ms - g_next_frame_at) >= 0) {
+        g_next_frame_at = now_ms;
+    }
 
     if (more == 0) {
         int error =
