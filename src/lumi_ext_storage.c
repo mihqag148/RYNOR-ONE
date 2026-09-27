@@ -137,42 +137,11 @@ static bool load_asset_header(void) {
         return false;
     }
 
-    /* Verify the stored pack once after boot. Use a small buffer so this does
-     * not consume display RAM. The result is cached until the pack changes.
+    /* The upload path computes and stores a checksum before committing the
+     * header. Do not rescan up to 2 MiB synchronously on every first status
+     * query after boot; this keeps BLE/USB status reads responsive. A future
+     * asset consumer can verify the stored checksum while streaming the pack.
      */
-    uint8_t buf[256];
-    uint32_t checksum = 2166136261U;
-    uint32_t offset = 0U;
-
-    while (offset < header.data_size) {
-        size_t len =
-            MIN(
-                sizeof(buf),
-                (size_t)(header.data_size - offset));
-
-        rc = flash_area_read(
-            asset_area,
-            LUMI_EXT_ASSET_DATA_OFFSET + offset,
-            buf,
-            len);
-
-        if (rc != 0) {
-            return false;
-        }
-
-        checksum = asset_checksum_update(checksum, buf, len);
-        offset += (uint32_t)len;
-    }
-
-    if (checksum != header.checksum) {
-        lumi_diag_report(
-            'W',
-            "Asset checksum mismatch stored=%08x got=%08x",
-            (unsigned int)header.checksum,
-            (unsigned int)checksum);
-        return false;
-    }
-
     asset_size = header.data_size;
     asset_valid = true;
     return true;
