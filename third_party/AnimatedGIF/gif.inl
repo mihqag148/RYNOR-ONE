@@ -359,8 +359,12 @@ static int GIFParseInfo(GIFIMAGE *pPage, int bInfoOnly)
                     {
                         pPage->ucGIFBits = p[iOffset+1]; // packed fields
                         pPage->iFrameDelay = (INTELSHORT(&p[iOffset+2]))*10; // delay in ms
-                        if (pPage->iFrameDelay <= 1) // 0-1 is going to make it run at 60fps; use 100 (10fps) as a reasonable substitute
-                           pPage->iFrameDelay = 100;
+                        /* RYNOR ONE preserves the GIF's native 10 ms timing.
+                         * A zero-delay frame is normalized to one centisecond
+                         * so playback can never busy-loop.
+                         */
+                        if (pPage->iFrameDelay == 0)
+                           pPage->iFrameDelay = 10;
                         if (pPage->ucGIFBits & 1) // transparent color is used
                             pPage->ucTransparent = p[iOffset+4]; // transparent color index
                         iOffset += 6;
@@ -622,8 +626,8 @@ int GIF_getInfo(GIFIMAGE *pPage, GIFINFO *pInfo)
                        //cBuf[iOff+3]; // page disposition flags
                         iDelay = cBuf[iOff+4]; // delay low byte
                         iDelay |= ((uint16_t)(cBuf[iOff+5]) << 8); // delay high byte
-                        if (iDelay < 2) // too fast, provide a default
-                            iDelay = 2;
+                        if (iDelay == 0) // normalize only an invalid zero delay
+                            iDelay = 1;
                         iDelay *= 10; // turn JIFFIES into milliseconds
                         iTotalDelay += iDelay;
                         if (iDelay > iMaxDelay) iMaxDelay = iDelay;
