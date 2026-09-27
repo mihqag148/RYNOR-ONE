@@ -24,7 +24,7 @@
 #define memcpy_P memcpy
 #pragma GCC optimize("O2")
 #endif
-#if (__ARM_ARCH >= 7) || defined(__arm64__) || defined(__aarch64__)
+#if (((__ARM_ARCH >= 7) || defined(__arm64__) || defined(__aarch64__)) && !defined(NO_SIMD))
 #include <arm_neon.h>
 #define HAS_NEON
 #endif 
