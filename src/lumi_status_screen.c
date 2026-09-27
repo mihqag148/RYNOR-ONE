@@ -2779,6 +2779,13 @@ static void refresh_screensaver(lv_timer_t *timer) {
 
     if (should_show_pc && screensaver_visible) {
         screensaver_visible = false;
+
+        if (screensaver_lv_timer) {
+            lv_timer_set_period(
+                screensaver_lv_timer,
+                SAVER_MIN_FRAME_MS);
+        }
+
         if (saver_media_format == SAVER_FORMAT_RAW_GIF) {
             lumi_raw_gif_stop();
         }
@@ -2790,6 +2797,15 @@ static void refresh_screensaver(lv_timer_t *timer) {
 
     if (should_show && !screensaver_visible) {
         screensaver_visible = true;
+
+        if (screensaver_lv_timer) {
+            lv_timer_set_period(
+                screensaver_lv_timer,
+                (saver_media_format == SAVER_FORMAT_RAW_GIF ||
+                 saver_media_format == SAVER_FORMAT_RYQ1)
+                    ? SAVER_PACKED_MIN_FRAME_MS
+                    : SAVER_MIN_FRAME_MS);
+        }
 
         /* The GIF path writes directly to the ST7789. While it is active,
          * stop LVGL from scheduling unrelated UI flushes on the same SPI bus.
@@ -2817,6 +2833,12 @@ static void refresh_screensaver(lv_timer_t *timer) {
     } else if (!should_show && screensaver_visible) {
         screensaver_visible = false;
         saver_packed_playback_started = false;
+
+        if (screensaver_lv_timer) {
+            lv_timer_set_period(
+                screensaver_lv_timer,
+                SAVER_MIN_FRAME_MS);
+        }
         if (saver_media_format == SAVER_FORMAT_RAW_GIF) {
             lumi_raw_gif_stop();
         }
