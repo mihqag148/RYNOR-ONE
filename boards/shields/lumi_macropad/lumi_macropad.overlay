@@ -286,7 +286,9 @@
         compatible = "jedec,spi-nor";
         reg = <0>;
         spi-max-frequency = <8000000>;
-        jedec-id = [ef 40 18];
+        /* 128 Mbit / 16 MiB. SFDP is read at runtime so compatible
+         * W25Q128/GD25Q128-class parts can be used on this module.
+         */
         size = <134217728>;
         has-dpd;
         t-enter-dpd = <3000>;
