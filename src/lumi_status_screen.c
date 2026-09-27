@@ -3297,6 +3297,39 @@ bool lumi_ui_saver_anim_is_valid(void) {
     return saver_flash_load_metadata();
 }
 
+uint32_t lumi_ui_saver_storage_used(void) {
+    if (!saver_flash_load_metadata()) {
+        return 0U;
+    }
+
+    uint32_t payload_bytes = 0U;
+
+    switch (saver_media_format) {
+        case SAVER_FORMAT_RAW_GIF:
+            payload_bytes = saver_raw_gif_data_size;
+            break;
+
+        case SAVER_FORMAT_RYQ1:
+            payload_bytes = saver_packed_data_size;
+            break;
+
+        case SAVER_FORMAT_RGB565_STATIC:
+            payload_bytes = LUMI_SAVER_IMAGE_BYTES;
+            break;
+
+        case SAVER_FORMAT_RGB332:
+        default:
+            payload_bytes =
+                (uint32_t)saver_media_frame_count *
+                LUMI_SAVER_FRAME_BYTES;
+            break;
+    }
+
+    return payload_bytes > 0U
+        ? SAVER_FLASH_DATA_OFFSET + payload_bytes
+        : 0U;
+}
+
 void lumi_ui_saver_anim_clear(void) {
     lumi_raw_gif_stop();
     saver_flash_invalidate();
