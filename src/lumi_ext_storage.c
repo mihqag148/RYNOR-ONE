@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include <zephyr/storage/flash_map.h>
-#include <zephyr/sys/crc.h>
+#include <zephyr/sys/util.h>
 
 #include "lumi_diag.h"
 #include "lumi_ext_storage.h"
@@ -17,7 +17,7 @@ struct lumi_asset_header {
     uint16_t version;
     uint16_t reserved;
     uint32_t data_size;
-    uint32_t crc32;
+    uint32_t checksum;
 };
 
 static const struct flash_area *asset_area;
@@ -27,7 +27,21 @@ static bool asset_uploading;
 static uint32_t asset_size;
 static uint32_t asset_expected;
 static uint32_t asset_received;
-static uint32_t asset_crc;
+static uint32_t asset_checksum;
+
+static uint32_t asset_checksum_update(
+    uint32_t hash,
+    const uint8_t *data,
+    size_t len) {
+
+    /* FNV-1a: compact incremental integrity check with no extra subsystem. */
+    for (size_t i = 0U; i < len; i++) {
+        hash ^= data[i];
+        hash *= 16777619U;
+    }
+
+    return hash;
+}
 
 static int open_area(
     int id,
@@ -127,7 +141,7 @@ static bool load_asset_header(void) {
      * not consume display RAM. The result is cached until the pack changes.
      */
     uint8_t buf[256];
-    uint32_t crc = 0U;
+    uint32_t checksum = 2166136261U;
     uint32_t offset = 0U;
 
     while (offset < header.data_size) {
@@ -146,16 +160,16 @@ static bool load_asset_header(void) {
             return false;
         }
 
-        crc = crc32_ieee_update(crc, buf, len);
+        checksum = asset_checksum_update(checksum, buf, len);
         offset += (uint32_t)len;
     }
 
-    if (crc != header.crc32) {
+    if (checksum != header.checksum) {
         lumi_diag_report(
             'W',
-            "Asset CRC mismatch stored=%08x got=%08x",
-            (unsigned int)header.crc32,
-            (unsigned int)crc);
+            "Asset checksum mismatch stored=%08x got=%08x",
+            (unsigned int)header.checksum,
+            (unsigned int)checksum);
         return false;
     }
 
@@ -192,7 +206,7 @@ bool lumi_ext_asset_begin(size_t total_bytes) {
     asset_size = 0U;
     asset_expected = (uint32_t)total_bytes;
     asset_received = 0U;
-    asset_crc = 0U;
+    asset_checksum = 2166136261U;
 
     return true;
 }
@@ -227,8 +241,8 @@ bool lumi_ext_asset_chunk(
         return false;
     }
 
-    asset_crc = crc32_ieee_update(
-        asset_crc,
+    asset_checksum = asset_checksum_update(
+        asset_checksum,
         data,
         len);
     asset_received += (uint32_t)len;
@@ -248,7 +262,7 @@ bool lumi_ext_asset_end(void) {
         .version = ASSET_VERSION,
         .reserved = 0U,
         .data_size = asset_expected,
-        .crc32 = asset_crc,
+        .checksum = asset_checksum,
     };
 
     int rc = flash_area_write(
@@ -269,9 +283,9 @@ bool lumi_ext_asset_end(void) {
 
     lumi_diag_report(
         'I',
-        "Asset pack ready bytes=%u crc=%08x",
+        "Asset pack ready bytes=%u sum=%08x",
         (unsigned int)asset_size,
-        (unsigned int)asset_crc);
+        (unsigned int)asset_checksum);
 
     return true;
 }
@@ -290,7 +304,7 @@ void lumi_ext_asset_clear(void) {
     asset_size = 0U;
     asset_expected = 0U;
     asset_received = 0U;
-    asset_crc = 0U;
+    asset_checksum = 2166136261U;
 }
 
 bool lumi_ext_asset_valid(void) {
