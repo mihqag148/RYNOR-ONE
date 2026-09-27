@@ -22,6 +22,7 @@ constexpr int kDisplayWidth = 320;
 constexpr int kDisplayHeight = 172;
 constexpr int kStripeRows = 8;
 constexpr uint32_t kMinFrameDelayMs = 10U;
+constexpr uint32_t kPresentIntervalMs = 40U; /* physical LCD budget: 25 FPS */
 
 AnimatedGIF g_gif;
 const struct flash_area *g_area = nullptr;
@@ -33,6 +34,9 @@ uint8_t g_scale_mode;
 bool g_opened;
 bool g_started;
 uint32_t g_next_frame_at;
+uint32_t g_next_present_at;
+bool g_suppress_opaque_output;
+bool g_frame_forced_present;
 int g_source_width;
 int g_source_height;
 int g_content_width;
@@ -392,6 +396,22 @@ void gif_draw(GIFDRAW *draw) {
         draw->iWidth == g_source_width &&
         draw->iHeight == g_source_height;
 
+    /*
+     * Full-frame video GIFs are safe to frame-drop: every frame completely
+     * replaces the previous one. Decode them on their original timeline but
+     * do not push more than the ST7789/SPIM3 link can physically sustain.
+     * Partial/translucent frames are never dropped because they depend on
+     * previous LCD contents for composition.
+     */
+    if (full_frame_opaque &&
+        g_suppress_opaque_output) {
+        return;
+    }
+
+    if (!full_frame_opaque) {
+        g_frame_forced_present = true;
+    }
+
     if (full_frame_opaque) {
         lv_color_t black =
             lv_color_make(0, 0, 0);
@@ -615,6 +635,9 @@ extern "C" void lumi_raw_gif_configure(
 extern "C" void lumi_raw_gif_reset_playback(void) {
     lumi_raw_gif_stop();
     g_next_frame_at = 0U;
+    g_next_present_at = 0U;
+    g_suppress_opaque_output = false;
+    g_frame_forced_present = false;
 }
 
 extern "C" void lumi_raw_gif_stop(void) {
@@ -643,6 +666,9 @@ extern "C" bool lumi_raw_gif_render_due(
 
         clear_display();
         g_next_frame_at = now_ms;
+        g_next_present_at = now_ms;
+        g_suppress_opaque_output = false;
+        g_frame_forced_present = false;
         g_started = true;
     }
 
@@ -652,11 +678,22 @@ extern "C" bool lumi_raw_gif_render_due(
 
     int delay_ms = 0;
 
+    g_suppress_opaque_output =
+        (int32_t)(now_ms - g_next_present_at) < 0;
+    g_frame_forced_present = false;
+
     int more =
         g_gif.playFrame(
             false,
             &delay_ms,
             nullptr);
+
+    if (!g_suppress_opaque_output ||
+        g_frame_forced_present) {
+        g_next_present_at =
+            now_ms +
+            kPresentIntervalMs;
+    }
 
     delay_ms =
         MAX(
