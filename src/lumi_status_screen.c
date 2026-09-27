@@ -2138,41 +2138,53 @@ static int saver_flash_commit_header(void) {
         saver_media_format == SAVER_FORMAT_RGB565_STATIC;
     bool packed_animation =
         saver_media_format == SAVER_FORMAT_RYQ1;
+    bool raw_gif =
+        saver_media_format == SAVER_FORMAT_RAW_GIF;
 
     struct saver_flash_header header = {
         .magic = SAVER_FLASH_MAGIC,
         .version = SAVER_FLASH_VERSION,
-        .width = packed_animation
-            ? saver_packed_storage_width
-            : (static_image
-                ? LUMI_SAVER_IMAGE_W
-                : LUMI_SAVER_FRAME_W),
-        .height = packed_animation
-            ? saver_packed_storage_height
-            : (static_image
-                ? LUMI_SAVER_IMAGE_H
-                : LUMI_SAVER_FRAME_H),
-        .frame_bytes = packed_animation
-            ? 0U
-            : (static_image
-                ? LUMI_SAVER_IMAGE_BYTES
-                : LUMI_SAVER_FRAME_BYTES),
+        .width = raw_gif
+            ? saver_raw_gif_source_width
+            : (packed_animation
+                ? saver_packed_storage_width
+                : (static_image
+                    ? LUMI_SAVER_IMAGE_W
+                    : LUMI_SAVER_FRAME_W)),
+        .height = raw_gif
+            ? saver_raw_gif_source_height
+            : (packed_animation
+                ? saver_packed_storage_height
+                : (static_image
+                    ? LUMI_SAVER_IMAGE_H
+                    : LUMI_SAVER_FRAME_H)),
+        .frame_bytes =
+            (packed_animation || raw_gif)
+                ? 0U
+                : (static_image
+                    ? LUMI_SAVER_IMAGE_BYTES
+                    : LUMI_SAVER_FRAME_BYTES),
         /* The outer legacy metadata field is only 8-bit. RYQ1 stores the
          * authoritative 16-bit frame count in its own header.
          */
-        .frame_count = packed_animation
-            ? 1U
-            : saver_media_frame_count,
+        .frame_count =
+            (packed_animation || raw_gif)
+                ? 1U
+                : saver_media_frame_count,
         .format = saver_media_format,
-        .interval_ms = static_image
-            ? 1000U
-            : saver_media_interval_ms,
-        .data_size = packed_animation
-            ? saver_packed_data_size
+        .interval_ms = raw_gif
+            ? saver_raw_gif_scale_mode
             : (static_image
-                ? LUMI_SAVER_IMAGE_BYTES
-                : (uint32_t)saver_media_frame_count *
-                  LUMI_SAVER_FRAME_BYTES),
+                ? 1000U
+                : saver_media_interval_ms),
+        .data_size = raw_gif
+            ? saver_raw_gif_data_size
+            : (packed_animation
+                ? saver_packed_data_size
+                : (static_image
+                    ? LUMI_SAVER_IMAGE_BYTES
+                    : (uint32_t)saver_media_frame_count *
+                      LUMI_SAVER_FRAME_BYTES)),
     };
 
     int rc = flash_area_write(
@@ -2185,7 +2197,7 @@ static int saver_flash_commit_header(void) {
         return rc;
     }
 
-    if (static_image || packed_animation) {
+    if (static_image || packed_animation || raw_gif) {
         return 0;
     }
 
