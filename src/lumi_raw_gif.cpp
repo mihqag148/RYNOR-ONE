@@ -105,8 +105,11 @@ int g_rgb444_start_y = -1;
 int g_rgb444_rows = 0;
 bool g_rgb444_tx_active = false;
 int g_rgb444_tx_result = 0;
+
+#if defined(CONFIG_SPI)
 bool g_rgb444_tx_sync_ready = false;
 struct k_sem g_rgb444_tx_done;
+#endif
 
 #if defined(CONFIG_SPI_ASYNC)
 struct spi_buf g_rgb444_async_buf = {};
