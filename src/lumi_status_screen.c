@@ -162,9 +162,18 @@ static uint8_t saver_packed_color_mode;
 static bool saver_packed_header_ready;
 static bool saver_packed_playback_started;
 static lv_color_t saver_packed_line_buf[320U];
-static uint8_t saver_packed_read_cache[256U];
+/* PC-optimized RYQ1 is read sequentially. A larger cache avoids thousands of
+ * tiny W25Q128 transactions while keeping RAM usage modest. */
+static uint8_t saver_packed_read_cache[4096U];
 static uint16_t saver_packed_cache_pos;
 static uint16_t saver_packed_cache_len;
+
+/* Native 320x172 RYQ1 first frames commonly contain full-width row spans.
+ * Batch consecutive rows into the existing saver stripe buffer so one frame
+ * needs ~22 display writes instead of ~172 single-row writes. Delta frames
+ * still write only the row spans that actually changed. */
+static uint16_t saver_packed_batch_start_y;
+static uint8_t saver_packed_batch_rows;
 static bool saver_static_drawn;
 static uint16_t saver_media_interval_ms = 40;
 static uint16_t saver_media_frame_intervals[LUMI_SAVER_MAX_FRAMES];
@@ -2428,6 +2437,81 @@ static void saver_packed_set_scaled_pixel(
     }
 }
 
+static bool saver_packed_flush_batch(void) {
+    if (saver_packed_batch_rows == 0U) {
+        return true;
+    }
+
+    struct display_buffer_descriptor desc = {
+        .buf_size =
+            (size_t)320U *
+            saver_packed_batch_rows *
+            sizeof(lv_color_t),
+        .width = 320U,
+        .height = saver_packed_batch_rows,
+        .pitch = 320U,
+    };
+
+    int rc = display_write(
+        saver_display,
+        0U,
+        saver_packed_batch_start_y,
+        &desc,
+        saver_stripe_buf);
+
+    if (rc != 0) {
+        lumi_diag_report(
+            'E',
+            "RYQ1 batch display_write rc=%d y=%u rows=%u",
+            rc,
+            (unsigned int)saver_packed_batch_start_y,
+            (unsigned int)saver_packed_batch_rows);
+    }
+
+    saver_packed_batch_rows = 0U;
+    return rc == 0;
+}
+
+static bool saver_packed_queue_full_row(
+    uint16_t y) {
+
+    if (y >= 172U) {
+        return false;
+    }
+
+    if (saver_packed_batch_rows == 0U) {
+        saver_packed_batch_start_y = y;
+    }
+
+    uint16_t expected_y =
+        (uint16_t)(
+            saver_packed_batch_start_y +
+            saver_packed_batch_rows);
+
+    if (y != expected_y ||
+        saver_packed_batch_rows >= SAVER_STRIPE_DST_ROWS) {
+        if (!saver_packed_flush_batch()) {
+            return false;
+        }
+        saver_packed_batch_start_y = y;
+    }
+
+    memcpy(
+        &saver_stripe_buf[
+            (size_t)saver_packed_batch_rows *
+            320U],
+        saver_packed_line_buf,
+        320U * sizeof(lv_color_t));
+
+    saver_packed_batch_rows++;
+
+    if (saver_packed_batch_rows >= SAVER_STRIPE_DST_ROWS) {
+        return saver_packed_flush_batch();
+    }
+
+    return true;
+}
+
 static bool saver_packed_decode_span(
     uint16_t source_y,
     uint16_t source_x,
@@ -2501,6 +2585,24 @@ static bool saver_packed_decode_span(
         return false;
     }
 
+    /* Native full-width RYQ1 rows are the hot path. Keep them queued until
+     * we have a multi-row stripe. This preserves exact image quality while
+     * reducing command/CS overhead dramatically. */
+    if (saver_packed_storage_width == 320U &&
+        saver_packed_storage_height == 172U &&
+        source_x == 0U &&
+        source_count == 320U &&
+        dx0 == 0U &&
+        dx1 == 320U &&
+        dy1 == (uint16_t)(dy0 + 1U)) {
+        return saver_packed_queue_full_row(dy0);
+    }
+
+    /* A partial span must appear after any queued rows that preceded it. */
+    if (!saver_packed_flush_batch()) {
+        return false;
+    }
+
     struct display_buffer_descriptor desc = {
         .buf_size = (size_t)(dx1 - dx0) * sizeof(lv_color_t),
         .width = (uint16_t)(dx1 - dx0),
@@ -2530,6 +2632,7 @@ static bool saver_packed_decode_span(
 }
 
 static void saver_packed_restart_playback(void) {
+    saver_packed_batch_rows = 0U;
     saver_packed_stream_reset(saver_packed_frames_offset);
     saver_packed_frame_index = 0U;
     saver_packed_next_frame_at = lv_tick_get();
@@ -2552,6 +2655,8 @@ static bool saver_packed_decode_next_frame(uint32_t now_ms) {
         saver_packed_stream_reset(saver_packed_frames_offset);
         saver_packed_frame_index = 0U;
     }
+
+    saver_packed_batch_rows = 0U;
 
     uint16_t duration_ms = 0U;
     uint16_t span_count = 0U;
@@ -2578,6 +2683,11 @@ static bool saver_packed_decode_next_frame(uint32_t now_ms) {
             saver_packed_playback_started = false;
             return false;
         }
+    }
+
+    if (!saver_packed_flush_batch()) {
+        saver_packed_playback_started = false;
+        return false;
     }
 
     saver_packed_frame_index++;
