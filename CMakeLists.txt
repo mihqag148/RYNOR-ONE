@@ -14,6 +14,15 @@ if(CONFIG_ZMK_DISPLAY_STATUS_SCREEN_CUSTOM)
     LUMI_FIRMWARE_VERSION=\"${LUMI_RELEASE_VERSION}\"
   )
 
+  # Native GIF playback is CPU-bound on the 64 MHz Cortex-M4.
+  # Keep the rest of ZMK size-optimized, but compile only the decoder/render
+  # translation units for throughput so SPI is not left idle between stripes.
+  set_source_files_properties(
+    ${CMAKE_CURRENT_LIST_DIR}/src/lumi_raw_gif.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/AnimatedGIF/AnimatedGIF.cpp
+    PROPERTIES COMPILE_OPTIONS "-O3"
+  )
+
   target_sources(app PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src/lumi_panel.c
     ${CMAKE_CURRENT_LIST_DIR}/src/lumi_status_screen.c
