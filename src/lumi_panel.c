@@ -21,6 +21,28 @@ static const struct device *const bl_gpio =
 static bool bl_ready;
 static bool panel_sleeping;
 
+#define PANEL_X_OFFSET DT_PROP(PANEL, x_offset)
+#define PANEL_Y_OFFSET DT_PROP(PANEL, y_offset)
+
+#if defined(CONFIG_SPI_ASYNC)
+K_SEM_DEFINE(lumi_panel_rgb444_done, 0, 1);
+static struct spi_buf lumi_panel_rgb444_buf;
+static struct spi_buf_set lumi_panel_rgb444_set;
+static bool lumi_panel_rgb444_active;
+static int lumi_panel_rgb444_result;
+
+static void lumi_panel_rgb444_callback(
+    const struct device *dev,
+    int result,
+    void *userdata) {
+    ARG_UNUSED(dev);
+    ARG_UNUSED(userdata);
+
+    lumi_panel_rgb444_result = result;
+    k_sem_give(&lumi_panel_rgb444_done);
+}
+#endif
+
 static int lumi_panel_send_command(uint8_t command) {
     if (!spi_is_ready_dt(&bus) || !gpio_is_ready_dt(&dc)) {
         return -ENODEV;
@@ -41,6 +63,184 @@ static int lumi_panel_send_command(uint8_t command) {
     }
 
     return err;
+}
+
+static int lumi_panel_send_command_data(
+    uint8_t command,
+    const uint8_t *data,
+    size_t len) {
+
+    int err = lumi_panel_send_command(command);
+    if (err != 0 || !data || len == 0U) {
+        return err;
+    }
+
+    struct spi_buf buffer = {
+        .buf = (void *)data,
+        .len = len,
+    };
+    const struct spi_buf_set buffers = {
+        .buffers = &buffer,
+        .count = 1,
+    };
+
+    err = gpio_pin_set_dt(&dc, 0);
+    if (err == 0) {
+        err = spi_write_dt(&bus, &buffers);
+    }
+
+    return err;
+}
+
+int lumi_panel_rgb444_wait(void) {
+#if defined(CONFIG_SPI_ASYNC)
+    if (!lumi_panel_rgb444_active) {
+        return 0;
+    }
+
+    int rc = k_sem_take(
+        &lumi_panel_rgb444_done,
+        K_FOREVER);
+    if (rc != 0) {
+        return rc;
+    }
+
+    lumi_panel_rgb444_active = false;
+    return lumi_panel_rgb444_result;
+#else
+    return 0;
+#endif
+}
+
+int lumi_panel_rgb444_begin_frame(void) {
+    if (!spi_is_ready_dt(&bus) ||
+        !gpio_is_ready_dt(&dc)) {
+        return -ENODEV;
+    }
+
+    int rc = lumi_panel_rgb444_wait();
+    if (rc != 0) {
+        return rc;
+    }
+
+    const uint8_t colmod = 0x03U;
+    rc = lumi_panel_send_command_data(
+        0x3AU,
+        &colmod,
+        sizeof(colmod));
+    if (rc != 0) {
+        return rc;
+    }
+
+    const uint16_t x0 = PANEL_X_OFFSET;
+    const uint16_t y0 = PANEL_Y_OFFSET;
+    const uint16_t x1 =
+        (uint16_t)(PANEL_X_OFFSET + 320U - 1U);
+    const uint16_t y1 =
+        (uint16_t)(PANEL_Y_OFFSET + 172U - 1U);
+
+    const uint8_t columns[4] = {
+        (uint8_t)(x0 >> 8),
+        (uint8_t)x0,
+        (uint8_t)(x1 >> 8),
+        (uint8_t)x1,
+    };
+    const uint8_t rows[4] = {
+        (uint8_t)(y0 >> 8),
+        (uint8_t)y0,
+        (uint8_t)(y1 >> 8),
+        (uint8_t)y1,
+    };
+
+    rc = lumi_panel_send_command_data(
+        0x2AU,
+        columns,
+        sizeof(columns));
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = lumi_panel_send_command_data(
+        0x2BU,
+        rows,
+        sizeof(rows));
+    if (rc != 0) {
+        return rc;
+    }
+
+    return lumi_panel_send_command(0x2CU);
+}
+
+int lumi_panel_rgb444_write_async(
+    const uint8_t *data,
+    size_t len) {
+
+    if (!data || len == 0U) {
+        return -EINVAL;
+    }
+
+    if (!spi_is_ready_dt(&bus) ||
+        !gpio_is_ready_dt(&dc)) {
+        return -ENODEV;
+    }
+
+    int rc = lumi_panel_rgb444_wait();
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = gpio_pin_set_dt(&dc, 0);
+    if (rc != 0) {
+        return rc;
+    }
+
+#if defined(CONFIG_SPI_ASYNC)
+    k_sem_reset(&lumi_panel_rgb444_done);
+
+    lumi_panel_rgb444_buf.buf =
+        (void *)data;
+    lumi_panel_rgb444_buf.len = len;
+    lumi_panel_rgb444_set.buffers =
+        &lumi_panel_rgb444_buf;
+    lumi_panel_rgb444_set.count = 1U;
+    lumi_panel_rgb444_result = 0;
+
+    rc = spi_transceive_cb(
+        bus.bus,
+        &bus.config,
+        &lumi_panel_rgb444_set,
+        NULL,
+        lumi_panel_rgb444_callback,
+        NULL);
+
+    if (rc == 0) {
+        lumi_panel_rgb444_active = true;
+    }
+
+    return rc;
+#else
+    struct spi_buf buffer = {
+        .buf = (void *)data,
+        .len = len,
+    };
+    const struct spi_buf_set buffers = {
+        .buffers = &buffer,
+        .count = 1U,
+    };
+    return spi_write_dt(&bus, &buffers);
+#endif
+}
+
+int lumi_panel_rgb444_end_frame(void) {
+    int rc = lumi_panel_rgb444_wait();
+
+    const uint8_t colmod = 0x05U;
+    int restore_rc = lumi_panel_send_command_data(
+        0x3AU,
+        &colmod,
+        sizeof(colmod));
+
+    return rc != 0 ? rc : restore_rc;
 }
 
 static int lumi_panel_backlight_init(void) {

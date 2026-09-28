@@ -86,8 +86,15 @@ static lv_color_t saver_stripe_buf[320U * SAVER_STRIPE_DST_ROWS];
 #define SAVER_FORMAT_RAW_GIF 3U
 #define SAVER_PACKED_MODE_RGB565 0U
 #define SAVER_PACKED_MODE_RGB332 1U
+#define SAVER_PACKED_MODE_P16 2U
 #define SAVER_PACKED_FLAGS 0x03U
+#define SAVER_PACKED_FLAGS_P16 0x10U
 #define SAVER_PACKED_HEADER_BYTES 26U
+#define SAVER_P16_PALETTE_COUNT 16U
+#define SAVER_P16_ROWS 4U
+#define SAVER_P16_ROW_PACKED_BYTES 160U
+#define SAVER_P16_STRIPE_PACKED_BYTES     (SAVER_P16_ROW_PACKED_BYTES * SAVER_P16_ROWS)
+#define SAVER_P16_STRIPE_RGB444_BYTES     (320U * SAVER_P16_ROWS * 3U / 2U)
 /* The W25Q128 external GIF partition is 10 MiB. Keep one 4 KiB sector
  * for the metadata header and use the rest for packed animation payload.
  */
@@ -159,6 +166,7 @@ static uint32_t saver_packed_cursor;
 static uint32_t saver_packed_next_frame_at;
 static uint16_t saver_packed_frame_index;
 static uint8_t saver_packed_color_mode;
+static uint8_t saver_packed_codec;
 static bool saver_packed_header_ready;
 static bool saver_packed_playback_started;
 static lv_color_t saver_packed_line_buf[320U];
@@ -167,6 +175,14 @@ static lv_color_t saver_packed_line_buf[320U];
 static uint8_t saver_packed_read_cache[4096U];
 static uint16_t saver_packed_cache_pos;
 static uint16_t saver_packed_cache_len;
+
+/* RYQ2/P16 uses one 4-bpp input stripe and two RGB444 output stripes.
+ * SPIM2 can refill/convert the next stripe while SPIM3 EasyDMA transmits
+ * the current one to the ST7789. */
+static uint8_t saver_p16_indices[SAVER_P16_STRIPE_PACKED_BYTES];
+static uint8_t saver_p16_rgb444[2][SAVER_P16_STRIPE_RGB444_BYTES];
+static uint8_t saver_p16_pair_lut[256U][3U];
+static uint8_t saver_p16_fill_index;
 
 /* Native 320x172 RYQ1 first frames commonly contain full-width row spans.
  * Batch consecutive rows into the existing saver stripe buffer so one frame
@@ -1734,6 +1750,8 @@ static void saver_packed_reset_state(void) {
     saver_packed_next_frame_at = 0U;
     saver_packed_frame_index = 0U;
     saver_packed_color_mode = SAVER_PACKED_MODE_RGB332;
+    saver_packed_codec = 0U;
+    saver_p16_fill_index = 0U;
     saver_packed_header_ready = false;
     saver_packed_playback_started = false;
     saver_packed_cache_pos = 0U;
@@ -1757,11 +1775,21 @@ static bool saver_packed_load_header(
         header,
         sizeof(header));
 
-    if (rc != 0 ||
-        header[0] != 'R' ||
-        header[1] != 'Y' ||
-        header[2] != 'Q' ||
-        header[3] != '1') {
+    bool is_ryq1 =
+        rc == 0 &&
+        header[0] == 'R' &&
+        header[1] == 'Y' &&
+        header[2] == 'Q' &&
+        header[3] == '1';
+
+    bool is_ryq2 =
+        rc == 0 &&
+        header[0] == 'R' &&
+        header[1] == 'Y' &&
+        header[2] == 'Q' &&
+        header[3] == '2';
+
+    if (!is_ryq1 && !is_ryq2) {
         return false;
     }
 
@@ -1784,22 +1812,37 @@ static bool saver_packed_load_header(
     uint16_t palette_count =
         saver_packed_read_le16(&header[22]);
 
-    bool storage_ok =
+    bool common_ok =
+        display_width == 320U &&
+        display_height == 172U &&
+        frame_count >= 1U &&
+        fps >= 1U &&
+        fps <= SAVER_PACKED_MAX_FPS &&
+        duration_ms > 0U;
+
+    bool ryq1_storage_ok =
         (storage_width == 320U && storage_height == 172U) ||
         (storage_width == 240U && storage_height == 129U) ||
         (storage_width == 160U && storage_height == 86U);
 
-    if ((color_mode != SAVER_PACKED_MODE_RGB565 &&
-         color_mode != SAVER_PACKED_MODE_RGB332) ||
-        flags != SAVER_PACKED_FLAGS ||
-        !storage_ok ||
-        display_width != 320U ||
-        display_height != 172U ||
-        frame_count < 1U ||
-        fps < 1U ||
-        fps > SAVER_PACKED_MAX_FPS ||
-        duration_ms == 0U ||
-        palette_count != 0U) {
+    bool ryq1_ok =
+        is_ryq1 &&
+        (color_mode == SAVER_PACKED_MODE_RGB565 ||
+         color_mode == SAVER_PACKED_MODE_RGB332) &&
+        flags == SAVER_PACKED_FLAGS &&
+        ryq1_storage_ok &&
+        palette_count == 0U;
+
+    bool ryq2_ok =
+        is_ryq2 &&
+        color_mode == SAVER_PACKED_MODE_P16 &&
+        flags == SAVER_PACKED_FLAGS_P16 &&
+        storage_width == 320U &&
+        storage_height == 172U &&
+        palette_count == SAVER_P16_PALETTE_COUNT;
+
+    if (!common_ok ||
+        (!ryq1_ok && !ryq2_ok)) {
         return false;
     }
 
@@ -1815,6 +1858,8 @@ static bool saver_packed_load_header(
         saver_packed_next_frame_at = 0U;
         saver_packed_frame_index = 0U;
         saver_packed_color_mode = color_mode;
+        saver_packed_codec = is_ryq2 ? 2U : 1U;
+        saver_p16_fill_index = 0U;
         saver_packed_header_ready = true;
         saver_packed_playback_started = false;
         /* Packed playback uses its own 16-bit frame counter and per-frame
@@ -1911,7 +1956,7 @@ static bool saver_flash_load_metadata(void) {
         if (!saver_packed_load_header(header.data_size, true) ||
             saver_packed_storage_width != header.width ||
             saver_packed_storage_height != header.height) {
-            lumi_diag_report('W', "RYQ1 header mismatch");
+            lumi_diag_report('W', "Packed saver header mismatch");
             return false;
         }
     } else if (raw_gif_ok) {
@@ -2367,6 +2412,74 @@ static bool saver_packed_read_u8(uint8_t *value) {
     return true;
 }
 
+static bool saver_packed_read_bytes(
+    uint8_t *destination,
+    size_t len) {
+
+    if (!destination ||
+        len == 0U ||
+        !saver_packed_header_ready ||
+        (uint64_t)saver_packed_cursor + len >
+            saver_packed_data_size) {
+        return false;
+    }
+
+    size_t copied = 0U;
+
+    while (copied < len) {
+        if (saver_packed_cache_pos >=
+            saver_packed_cache_len) {
+
+            uint32_t remaining =
+                saver_packed_data_size -
+                saver_packed_cursor;
+
+            uint16_t read_len =
+                (uint16_t)MIN(
+                    (uint32_t)sizeof(
+                        saver_packed_read_cache),
+                    remaining);
+
+            if (read_len == 0U ||
+                flash_area_read(
+                    saver_flash,
+                    SAVER_FLASH_DATA_OFFSET +
+                        saver_packed_cursor,
+                    saver_packed_read_cache,
+                    read_len) != 0) {
+                return false;
+            }
+
+            saver_packed_cache_pos = 0U;
+            saver_packed_cache_len = read_len;
+        }
+
+        size_t available =
+            (size_t)(
+                saver_packed_cache_len -
+                saver_packed_cache_pos);
+
+        size_t take =
+            MIN(
+                len - copied,
+                available);
+
+        memcpy(
+            destination + copied,
+            saver_packed_read_cache +
+                saver_packed_cache_pos,
+            take);
+
+        saver_packed_cache_pos +=
+            (uint16_t)take;
+        saver_packed_cursor +=
+            (uint32_t)take;
+        copied += take;
+    }
+
+    return true;
+}
+
 static bool saver_packed_read_u16(uint16_t *value) {
     uint8_t lo = 0U;
     uint8_t hi = 0U;
@@ -2639,6 +2752,156 @@ static void saver_packed_restart_playback(void) {
     saver_packed_playback_started = true;
 }
 
+static void saver_p16_build_pair_lut(
+    const uint16_t palette[16]) {
+
+    uint8_t r4[16];
+    uint8_t g4[16];
+    uint8_t b4[16];
+
+    for (uint8_t i = 0U; i < 16U; i++) {
+        uint16_t value = palette[i];
+
+        uint8_t r5 =
+            (uint8_t)((value >> 11) & 0x1FU);
+        uint8_t g6 =
+            (uint8_t)((value >> 5) & 0x3FU);
+        uint8_t b5 =
+            (uint8_t)(value & 0x1FU);
+
+        r4[i] =
+            (uint8_t)((r5 * 15U + 15U) / 31U);
+        g4[i] =
+            (uint8_t)((g6 * 15U + 31U) / 63U);
+        b4[i] =
+            (uint8_t)((b5 * 15U + 15U) / 31U);
+    }
+
+    for (uint16_t pair = 0U;
+         pair < 256U;
+         pair++) {
+
+        uint8_t i0 =
+            (uint8_t)(pair >> 4);
+        uint8_t i1 =
+            (uint8_t)(pair & 0x0FU);
+
+        saver_p16_pair_lut[pair][0] =
+            (uint8_t)((r4[i0] << 4) |
+                      g4[i0]);
+
+        saver_p16_pair_lut[pair][1] =
+            (uint8_t)((b4[i0] << 4) |
+                      r4[i1]);
+
+        saver_p16_pair_lut[pair][2] =
+            (uint8_t)((g4[i1] << 4) |
+                      b4[i1]);
+    }
+}
+
+static bool saver_p16_decode_frame(void) {
+    uint16_t palette[16];
+
+    for (uint8_t i = 0U; i < 16U; i++) {
+        if (!saver_packed_read_u16(
+                &palette[i])) {
+            return false;
+        }
+    }
+
+    saver_p16_build_pair_lut(palette);
+
+    int rc =
+        lumi_panel_rgb444_begin_frame();
+
+    if (rc != 0) {
+        lumi_diag_report(
+            'E',
+            "RYQ2 RGB444 begin rc=%d",
+            rc);
+        return false;
+    }
+
+    bool ok = true;
+    saver_p16_fill_index = 0U;
+
+    for (uint16_t y = 0U;
+         y < 172U;
+         y += SAVER_P16_ROWS) {
+
+        uint16_t rows =
+            MIN(
+                (uint16_t)SAVER_P16_ROWS,
+                (uint16_t)(172U - y));
+
+        size_t packed_bytes =
+            (size_t)rows *
+            SAVER_P16_ROW_PACKED_BYTES;
+
+        size_t output_bytes =
+            (size_t)rows *
+            320U *
+            3U /
+            2U;
+
+        if (!saver_packed_read_bytes(
+                saver_p16_indices,
+                packed_bytes)) {
+            ok = false;
+            break;
+        }
+
+        uint8_t *output =
+            saver_p16_rgb444[
+                saver_p16_fill_index];
+
+        size_t out = 0U;
+
+        for (size_t i = 0U;
+             i < packed_bytes;
+             i++) {
+            const uint8_t *rgb =
+                saver_p16_pair_lut[
+                    saver_p16_indices[i]];
+
+            output[out++] = rgb[0];
+            output[out++] = rgb[1];
+            output[out++] = rgb[2];
+        }
+
+        rc =
+            lumi_panel_rgb444_write_async(
+                output,
+                output_bytes);
+
+        if (rc != 0) {
+            lumi_diag_report(
+                'E',
+                "RYQ2 RGB444 write rc=%d y=%u",
+                rc,
+                (unsigned int)y);
+            ok = false;
+            break;
+        }
+
+        saver_p16_fill_index ^= 1U;
+    }
+
+    int end_rc =
+        lumi_panel_rgb444_end_frame();
+
+    if (end_rc != 0) {
+        lumi_diag_report(
+            'E',
+            "RYQ2 RGB444 end rc=%d",
+            end_rc);
+        ok = false;
+    }
+
+    return ok;
+}
+
 static bool saver_packed_decode_next_frame(uint32_t now_ms) {
     if (saver_media_format != SAVER_FORMAT_RYQ1 ||
         !saver_packed_header_ready ||
@@ -2659,10 +2922,31 @@ static bool saver_packed_decode_next_frame(uint32_t now_ms) {
     saver_packed_batch_rows = 0U;
 
     uint16_t duration_ms = 0U;
+
+    if (!saver_packed_read_u16(&duration_ms)) {
+        return false;
+    }
+
+    if (saver_packed_codec == 2U) {
+        if (!saver_p16_decode_frame()) {
+            lumi_diag_report(
+                'E',
+                "RYQ2 decode failed frame=%u",
+                (unsigned int)saver_packed_frame_index);
+            saver_packed_playback_started = false;
+            return false;
+        }
+
+        saver_packed_frame_index++;
+        saver_packed_next_frame_at =
+            now_ms +
+            MAX((uint32_t)duration_ms, 1U);
+        return true;
+    }
+
     uint16_t span_count = 0U;
 
-    if (!saver_packed_read_u16(&duration_ms) ||
-        !saver_packed_read_u16(&span_count)) {
+    if (!saver_packed_read_u16(&span_count)) {
         return false;
     }
 
@@ -2797,9 +3081,8 @@ static void draw_custom_saver_frame(
 }
 
 static void refresh_screensaver(lv_timer_t *timer) {
-    /* RYQ1 stores exact per-frame GIF delays. Poll it at GIF's 10 ms timing
-     * granularity; keep the older RGB332 path at 40 ms so it does not redraw
-     * four times more often than before.
+    /* RYQ1/RYQ2 store per-frame delays. Poll packed playback at 10 ms
+     * granularity; keep the older RGB332 path at 40 ms.
      */
     lv_timer_set_period(
         timer,
