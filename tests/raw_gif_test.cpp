@@ -15,7 +15,7 @@ static void test_flash_cache() {
     for (int i = 0; i < size; ++i) {
         assert(gif_read(&file, &byte, 1) == 1 && byte == flash_bytes[i]);
     }
-    assert(flash_reads == 2); // 10007 single-byte reads become two 8 KiB NOR reads.
+    assert(flash_reads == 3); // 10007 single-byte reads become three 4 KiB NOR reads.
     assert(gif_read(&file, &byte, 1) == 0);
     uint8_t block[9000];
     gif_seek(&file, 900);
@@ -33,11 +33,11 @@ static void test_flash_cache() {
     assert(gif_open("", &size));
     gif_seek(&file, 0);
     fail_read = flash_reads + 2;
-    assert(gif_read(&file, block, sizeof(block)) == 8192);
-    assert(file.iPos == 8192);
+    assert(gif_read(&file, block, sizeof(block)) == 4096);
+    assert(file.iPos == 4096);
     fail_read = 0;
-    assert(gif_read(&file, block, sizeof(block)) == size - 8192);
-    assert(memcmp(block, flash_bytes.data() + 8192, size - 8192) == 0);
+    assert(gif_read(&file, block, sizeof(block)) == size - 4096);
+    assert(memcmp(block, flash_bytes.data() + 4096, size - 4096) == 0);
     gif_close(nullptr);
 }
 
