@@ -99,9 +99,22 @@ lv_color_t g_stripe[kDisplayWidth * kStripeRows];
 int g_stripe_start_y = -1;
 int g_stripe_rows = 0;
 
-uint8_t g_rgb444_stripe[kRgb444BytesPerRow * kRgb444StripeRows];
+uint8_t g_rgb444_stripes[2][kRgb444BytesPerRow * kRgb444StripeRows];
+int g_rgb444_fill_index = 0;
 int g_rgb444_start_y = -1;
 int g_rgb444_rows = 0;
+bool g_rgb444_tx_active = false;
+int g_rgb444_tx_result = 0;
+
+#if defined(CONFIG_SPI)
+bool g_rgb444_tx_sync_ready = false;
+struct k_sem g_rgb444_tx_done;
+#endif
+
+#if defined(CONFIG_SPI_ASYNC)
+struct spi_buf g_rgb444_async_buf = {};
+struct spi_buf_set g_rgb444_async_set = {};
+#endif
 
 void flush_stripe();
 
@@ -161,6 +174,103 @@ bool panel_command(
     /* logical 0 drives D/C high (pixel/parameter data). */
     return gpio_pin_set_dt(&g_panel_dc, 0) == 0 &&
            spi_write_dt(&g_panel_spi, &data_set) == 0;
+}
+
+bool panel_data(
+    const uint8_t *data,
+    size_t length);
+
+void ensure_rgb444_tx_sync() {
+    if (!g_rgb444_tx_sync_ready) {
+        k_sem_init(
+            &g_rgb444_tx_done,
+            0,
+            1);
+        g_rgb444_tx_sync_ready = true;
+    }
+}
+
+#if defined(CONFIG_SPI_ASYNC)
+void panel_async_done(
+    const struct device *dev,
+    int result,
+    void *userdata) {
+
+    (void)dev;
+    (void)userdata;
+
+    g_rgb444_tx_result = result;
+    k_sem_give(&g_rgb444_tx_done);
+}
+#endif
+
+bool wait_rgb444_tx() {
+    if (!g_rgb444_tx_active) {
+        return true;
+    }
+
+    ensure_rgb444_tx_sync();
+
+    if (k_sem_take(
+            &g_rgb444_tx_done,
+            K_FOREVER) != 0) {
+        return false;
+    }
+
+    g_rgb444_tx_active = false;
+    return g_rgb444_tx_result == 0;
+}
+
+bool panel_data_async(
+    const uint8_t *data,
+    size_t length) {
+
+#if defined(CONFIG_SPI_ASYNC)
+    if (!data ||
+        length == 0U ||
+        !spi_is_ready_dt(&g_panel_spi) ||
+        !gpio_is_ready_dt(&g_panel_dc)) {
+        return false;
+    }
+
+    if (!wait_rgb444_tx()) {
+        return false;
+    }
+
+    ensure_rgb444_tx_sync();
+    k_sem_reset(&g_rgb444_tx_done);
+
+    if (gpio_pin_set_dt(&g_panel_dc, 0) != 0) {
+        return false;
+    }
+
+    g_rgb444_async_buf.buf =
+        const_cast<uint8_t *>(data);
+    g_rgb444_async_buf.len = length;
+    g_rgb444_async_set.buffers =
+        &g_rgb444_async_buf;
+    g_rgb444_async_set.count = 1U;
+
+    g_rgb444_tx_result = 0;
+
+    int rc =
+        spi_transceive_cb(
+            g_panel_spi.bus,
+            &g_panel_spi.config,
+            &g_rgb444_async_set,
+            nullptr,
+            panel_async_done,
+            nullptr);
+
+    if (rc != 0) {
+        return false;
+    }
+
+    g_rgb444_tx_active = true;
+    return true;
+#else
+    return panel_data(data, length);
+#endif
 }
 
 bool panel_data(
@@ -225,6 +335,10 @@ bool panel_fast_path_available() {
            gpio_is_ready_dt(&g_panel_dc);
 }
 #else
+bool wait_rgb444_tx() {
+    return true;
+}
+
 bool panel_fast_path_available() {
     return false;
 }
@@ -460,8 +574,8 @@ void flush_rgb444_stripe() {
         }
 
         if (ok) {
-            ok = panel_data(
-                g_rgb444_stripe,
+            ok = panel_data_async(
+                g_rgb444_stripes[g_rgb444_fill_index],
                 kRgb444BytesPerRow *
                     static_cast<size_t>(g_rgb444_rows));
         }
@@ -474,7 +588,7 @@ void flush_rgb444_stripe() {
                 static_cast<uint16_t>(g_rgb444_rows)) &&
             panel_command(
                 kCmdRamWr,
-                g_rgb444_stripe,
+                g_rgb444_stripes[g_rgb444_fill_index],
                 kRgb444BytesPerRow *
                     static_cast<size_t>(g_rgb444_rows));
     }
@@ -486,12 +600,17 @@ void flush_rgb444_stripe() {
     }
 #endif
 
+    if (g_rgb444_tx_active) {
+        g_rgb444_fill_index ^= 1;
+    }
+
     g_rgb444_start_y = -1;
     g_rgb444_rows = 0;
 }
 
 void leave_fast_panel_mode() {
     flush_rgb444_stripe();
+    (void)wait_rgb444_tx();
 
     if (!g_fast_panel_mode) {
         return;
@@ -570,6 +689,7 @@ void append_rgb444_row(
         y != g_rgb444_last_input_y + 1) {
         g_rgb444_frame_sequential = false;
         flush_rgb444_stripe();
+        (void)wait_rgb444_tx();
         g_rgb444_stream_active = false;
     }
 
@@ -590,7 +710,7 @@ void append_rgb444_row(
     }
 
     uint8_t *out =
-        &g_rgb444_stripe[
+        &g_rgb444_stripes[g_rgb444_fill_index][
             static_cast<size_t>(g_rgb444_rows) *
             kRgb444BytesPerRow];
 
@@ -1111,6 +1231,7 @@ extern "C" void lumi_raw_gif_stop(void) {
     g_opened = false;
     g_started = false;
     g_rgb444_stream_active = false;
+    g_rgb444_fill_index = 0;
 }
 
 extern "C" bool lumi_raw_gif_render_due(
@@ -1157,6 +1278,7 @@ extern "C" bool lumi_raw_gif_render_due(
         g_stripe_start_y = -1;
         g_rgb444_rows = 0;
         g_rgb444_start_y = -1;
+        (void)wait_rgb444_tx();
         lumi_raw_gif_stop();
         return false;
     }
@@ -1166,6 +1288,7 @@ extern "C" bool lumi_raw_gif_render_due(
      */
     flush_stripe();
     flush_rgb444_stripe();
+    (void)wait_rgb444_tx();
 
     if (!g_suppress_opaque_output ||
         g_frame_forced_present) {
