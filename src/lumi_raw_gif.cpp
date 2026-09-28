@@ -173,6 +173,10 @@ bool panel_command(
            spi_write_dt(&g_panel_spi, &data_set) == 0;
 }
 
+bool panel_data(
+    const uint8_t *data,
+    size_t length);
+
 void ensure_rgb444_tx_sync() {
     if (!g_rgb444_tx_sync_ready) {
         k_sem_init(
@@ -328,6 +332,10 @@ bool panel_fast_path_available() {
            gpio_is_ready_dt(&g_panel_dc);
 }
 #else
+bool wait_rgb444_tx() {
+    return true;
+}
+
 bool panel_fast_path_available() {
     return false;
 }
