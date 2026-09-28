@@ -112,7 +112,21 @@ int lumi_panel_rgb444_wait(void) {
 #endif
 }
 
-int lumi_panel_rgb444_begin_frame(void) {
+int lumi_panel_rgb444_begin_rect(
+    uint16_t x,
+    uint16_t y,
+    uint16_t width,
+    uint16_t height) {
+
+    if (width == 0U ||
+        height == 0U ||
+        x >= 320U ||
+        y >= 172U ||
+        (uint32_t)x + width > 320U ||
+        (uint32_t)y + height > 172U) {
+        return -EINVAL;
+    }
+
     if (!spi_is_ready_dt(&bus) ||
         !gpio_is_ready_dt(&dc)) {
         return -ENODEV;
@@ -132,12 +146,14 @@ int lumi_panel_rgb444_begin_frame(void) {
         return rc;
     }
 
-    const uint16_t x0 = PANEL_X_OFFSET;
-    const uint16_t y0 = PANEL_Y_OFFSET;
+    const uint16_t x0 =
+        (uint16_t)(PANEL_X_OFFSET + x);
+    const uint16_t y0 =
+        (uint16_t)(PANEL_Y_OFFSET + y);
     const uint16_t x1 =
-        (uint16_t)(PANEL_X_OFFSET + 320U - 1U);
+        (uint16_t)(x0 + width - 1U);
     const uint16_t y1 =
-        (uint16_t)(PANEL_Y_OFFSET + 172U - 1U);
+        (uint16_t)(y0 + height - 1U);
 
     const uint8_t columns[4] = {
         (uint8_t)(x0 >> 8),
@@ -169,6 +185,14 @@ int lumi_panel_rgb444_begin_frame(void) {
     }
 
     return lumi_panel_send_command(0x2CU);
+}
+
+int lumi_panel_rgb444_begin_frame(void) {
+    return lumi_panel_rgb444_begin_rect(
+        0U,
+        0U,
+        320U,
+        172U);
 }
 
 int lumi_panel_rgb444_write_async(
