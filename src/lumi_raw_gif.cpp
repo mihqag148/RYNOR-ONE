@@ -26,13 +26,14 @@ constexpr uint32_t kGifDataOffset = 0x1000U;
 constexpr int kDisplayWidth = 320;
 constexpr int kDisplayHeight = 172;
 constexpr int kStripeRows = 8;
-constexpr int kRgb444StripeRows = 16;
+constexpr int kRgb444StripeRows = 12;
 constexpr uint32_t kMinFrameDelayMs = 10U;
 /*
  * RGB444 full-screen transfer at 32 MHz is ~20.6 ms before decode overhead.
- * Cap presentation near 30 FPS instead of forcing the LCD itself to 25 Hz.
+ * Allow up to 40 FPS; source frames above the physical budget are still
+ * decoded on their original timeline and presentation-dropped as needed.
  */
-constexpr uint32_t kPresentIntervalMs = 33U;
+constexpr uint32_t kPresentIntervalMs = 25U;
 constexpr size_t kRgb444BytesPerRow =
     static_cast<size_t>(kDisplayWidth) * 3U / 2U;
 
@@ -82,9 +83,19 @@ uint8_t g_mask[kDisplayWidth];
  * LCD stripe. Cache source bytes, not decoded colors: palettes, transparency
  * and source resolution remain unchanged. Never read past the uploaded GIF.
  */
-uint8_t g_read_cache[2048];
+uint8_t g_read_cache[8192];
 int32_t g_cache_start;
 int32_t g_cache_size;
+
+#if defined(CONFIG_SPI)
+uint32_t g_perf_window_start_ms;
+uint32_t g_perf_frame_count;
+uint32_t g_perf_presented_count;
+uint32_t g_perf_flash_read_count;
+uint32_t g_perf_flash_bytes;
+uint32_t g_perf_spi_wait_ms;
+uint32_t g_perf_render_ms;
+#endif
 
 /*
  * Native GIF fast path.
@@ -211,11 +222,17 @@ bool wait_rgb444_tx() {
 
     ensure_rgb444_tx_sync();
 
+    uint32_t wait_started =
+        k_uptime_get_32();
+
     if (k_sem_take(
             &g_rgb444_tx_done,
             K_FOREVER) != 0) {
         return false;
     }
+
+    g_perf_spi_wait_ms +=
+        k_uptime_get_32() - wait_started;
 
     g_rgb444_tx_active = false;
     return g_rgb444_tx_result == 0;
@@ -414,6 +431,11 @@ int32_t gif_read(
                     g_read_cache, static_cast<size_t>(refill)) != 0) {
                 return copied;
             }
+#if defined(CONFIG_SPI)
+            g_perf_flash_read_count++;
+            g_perf_flash_bytes +=
+                static_cast<uint32_t>(refill);
+#endif
             g_cache_size = refill;
             offset = 0;
         }
@@ -1251,6 +1273,15 @@ extern "C" bool lumi_raw_gif_render_due(
         g_suppress_opaque_output = false;
         g_frame_forced_present = false;
         g_started = true;
+#if defined(CONFIG_SPI)
+        g_perf_window_start_ms = now_ms;
+        g_perf_frame_count = 0U;
+        g_perf_presented_count = 0U;
+        g_perf_flash_read_count = 0U;
+        g_perf_flash_bytes = 0U;
+        g_perf_spi_wait_ms = 0U;
+        g_perf_render_ms = 0U;
+#endif
     }
 
     if ((int32_t)(now_ms - g_next_frame_at) < 0) {
@@ -1266,11 +1297,22 @@ extern "C" bool lumi_raw_gif_render_due(
         (int32_t)(now_ms - g_next_present_at) < 0;
     g_frame_forced_present = false;
 
+#if defined(CONFIG_SPI)
+    uint32_t render_started =
+        k_uptime_get_32();
+#endif
+
     int more =
         g_gif.playFrame(
             false,
             &delay_ms,
             nullptr);
+
+#if defined(CONFIG_SPI)
+    g_perf_render_ms +=
+        k_uptime_get_32() - render_started;
+    g_perf_frame_count++;
+#endif
 
     if (more < 0) {
         lumi_diag_report('E', "Raw GIF decode error=%d", g_gif.getLastError());
@@ -1295,7 +1337,44 @@ extern "C" bool lumi_raw_gif_render_due(
         g_next_present_at =
             now_ms +
             kPresentIntervalMs;
+#if defined(CONFIG_SPI)
+        g_perf_presented_count++;
+#endif
     }
+
+#if defined(CONFIG_SPI)
+    uint32_t perf_now =
+        k_uptime_get_32();
+
+    uint32_t perf_elapsed =
+        perf_now - g_perf_window_start_ms;
+
+    if (perf_elapsed >= 1000U) {
+        uint32_t avg_render =
+            g_perf_frame_count > 0U
+                ? g_perf_render_ms /
+                    g_perf_frame_count
+                : 0U;
+
+        lumi_diag_report(
+            'I',
+            "GIF PERF frame=%ums decoded=%u shown=%u spi_wait=%ums flash=%uKB reads=%u",
+            avg_render,
+            g_perf_frame_count,
+            g_perf_presented_count,
+            g_perf_spi_wait_ms,
+            g_perf_flash_bytes / 1024U,
+            g_perf_flash_read_count);
+
+        g_perf_window_start_ms = perf_now;
+        g_perf_frame_count = 0U;
+        g_perf_presented_count = 0U;
+        g_perf_flash_read_count = 0U;
+        g_perf_flash_bytes = 0U;
+        g_perf_spi_wait_ms = 0U;
+        g_perf_render_ms = 0U;
+    }
+#endif
 
     delay_ms =
         MAX(
