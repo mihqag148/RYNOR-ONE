@@ -26,7 +26,9 @@ constexpr uint32_t kGifDataOffset = 0x1000U;
 constexpr int kDisplayWidth = 320;
 constexpr int kDisplayHeight = 172;
 constexpr int kStripeRows = 8;
-constexpr int kRgb444StripeRows = 12;
+/* Raw GIF is now a compatibility fallback. Keep its EasyDMA buffers small;
+ * the primary P16 path has its own dedicated double buffer. */
+constexpr int kRgb444StripeRows = 6;
 constexpr uint32_t kMinFrameDelayMs = 10U;
 /*
  * RGB444 full-screen transfer at 32 MHz is ~20.6 ms before decode overhead.
@@ -83,7 +85,7 @@ uint8_t g_mask[kDisplayWidth];
  * LCD stripe. Cache source bytes, not decoded colors: palettes, transparency
  * and source resolution remain unchanged. Never read past the uploaded GIF.
  */
-uint8_t g_read_cache[8192];
+uint8_t g_read_cache[4096];
 int32_t g_cache_start;
 int32_t g_cache_size;
 
