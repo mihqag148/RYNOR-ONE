@@ -323,8 +323,9 @@
 
 // Six WS2812B LEDs on P0.06. The SPI peripheral only generates the
 // WS2812 data waveform; there is no separate SCK wire to the LEDs.
-// WS2812 needs only 4 MHz; leave the high-speed instance for the TFT.
-&spi1 {
+// WS2812 needs only 4 MHz. Keep it on SPIM0 so the TFT can own SPIM3
+// without relying on the SPIM1 path that regressed the strip after v1.14.39.
+&spi0 {
     compatible = "nordic,nrf-spim";
     status = "okay";
     pinctrl-0 = <&lumi_rgb_spi_default>;
