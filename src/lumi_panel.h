@@ -17,6 +17,11 @@ int lumi_panel_set_backlight(bool enabled);
  * stripe while the current one is on the wire.
  */
 int lumi_panel_rgb444_begin_frame(void);
+int lumi_panel_rgb444_begin_rect(
+    uint16_t x,
+    uint16_t y,
+    uint16_t width,
+    uint16_t height);
 int lumi_panel_rgb444_write_async(const uint8_t *data, size_t len);
 int lumi_panel_rgb444_wait(void);
 int lumi_panel_rgb444_end_frame(void);
