@@ -4,7 +4,7 @@
 extern "C" void lumi_diag_report(char, const char *, ...) {}
 
 static void test_flash_cache() {
-    flash_bytes.resize(3107);
+    flash_bytes.resize(10007);
     for (size_t i = 0; i < flash_bytes.size(); ++i) flash_bytes[i] = i * 17;
     g_data_size = flash_bytes.size();
     int32_t size;
@@ -15,9 +15,9 @@ static void test_flash_cache() {
     for (int i = 0; i < size; ++i) {
         assert(gif_read(&file, &byte, 1) == 1 && byte == flash_bytes[i]);
     }
-    assert(flash_reads == 2); // 3107 small reads become two 2 KiB NOR reads.
+    assert(flash_reads == 2); // 10007 single-byte reads become two 8 KiB NOR reads.
     assert(gif_read(&file, &byte, 1) == 0);
-    uint8_t block[2200];
+    uint8_t block[9000];
     gif_seek(&file, 900);
     assert(gif_read(&file, block, sizeof(block)) == sizeof(block));
     assert(memcmp(block, flash_bytes.data() + 900, sizeof(block)) == 0);
@@ -33,11 +33,11 @@ static void test_flash_cache() {
     assert(gif_open("", &size));
     gif_seek(&file, 0);
     fail_read = flash_reads + 2;
-    assert(gif_read(&file, block, sizeof(block)) == 2048);
-    assert(file.iPos == 2048);
+    assert(gif_read(&file, block, sizeof(block)) == 8192);
+    assert(file.iPos == 8192);
     fail_read = 0;
-    assert(gif_read(&file, block, sizeof(block)) == size - 2048);
-    assert(memcmp(block, flash_bytes.data() + 2048, size - 2048) == 0);
+    assert(gif_read(&file, block, sizeof(block)) == size - 8192);
+    assert(memcmp(block, flash_bytes.data() + 8192, size - 8192) == 0);
     gif_close(nullptr);
 }
 
