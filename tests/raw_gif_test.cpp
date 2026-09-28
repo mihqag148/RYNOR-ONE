@@ -113,9 +113,9 @@ static void test_rgb444_pack() {
 
     assert(g_rgb444_rows == 1);
     assert(g_rgb444_start_y == 0);
-    assert(g_rgb444_stripe[0] == 0xF0);
-    assert(g_rgb444_stripe[1] == 0x00);
-    assert(g_rgb444_stripe[2] == 0xF0);
+    assert(g_rgb444_stripes[g_rgb444_fill_index][0] == 0xF0);
+    assert(g_rgb444_stripes[g_rgb444_fill_index][1] == 0x00);
+    assert(g_rgb444_stripes[g_rgb444_fill_index][2] == 0xF0);
 
     g_rgb444_rows = 0;
     g_rgb444_start_y = -1;
