@@ -26,9 +26,13 @@ constexpr uint32_t kGifDataOffset = 0x1000U;
 constexpr int kDisplayWidth = 320;
 constexpr int kDisplayHeight = 172;
 constexpr int kStripeRows = 8;
+constexpr int kRgb444StripeRows = 16;
 constexpr uint32_t kMinFrameDelayMs = 10U;
-constexpr uint32_t kPresentIntervalMs = 40U; /* panel is synchronized near 25 FPS */
-constexpr uint32_t kPanelLeadMs = 8U;
+/*
+ * RGB444 full-screen transfer at 32 MHz is ~20.6 ms before decode overhead.
+ * Cap presentation near 30 FPS instead of forcing the LCD itself to 25 Hz.
+ */
+constexpr uint32_t kPresentIntervalMs = 33U;
 constexpr size_t kRgb444BytesPerRow =
     static_cast<size_t>(kDisplayWidth) * 3U / 2U;
 
@@ -37,23 +41,6 @@ constexpr uint8_t kCmdCaseT = 0x2AU;
 constexpr uint8_t kCmdRaseT = 0x2BU;
 constexpr uint8_t kCmdRamWr = 0x2CU;
 constexpr uint8_t kCmdColMod = 0x3AU;
-constexpr uint8_t kCmdPorCtrl = 0xB2U;
-constexpr uint8_t kCmdFrCtrl2 = 0xC6U;
-
-/*
- * Default Zephyr init is 60 Hz with 12/12 front/back porches.
- * During native full-frame GIF playback use RTNA=31 and 108/108 porches:
- *
- * 10 MHz / ((320 + 108 + 108) * (250 + 31*16)) ~= 25.0 Hz.
- *
- * Matching the panel scan to the 25 FPS presentation budget, then starting
- * each transfer a few milliseconds after the scan begins, keeps the writer
- * behind the visible scan instead of letting a tear line walk down the LCD.
- */
-constexpr uint8_t kGifPorch[5] = {0x6C, 0x6C, 0x00, 0x33, 0x33};
-constexpr uint8_t kUiPorch[5] = {0x0C, 0x0C, 0x00, 0x33, 0x33};
-constexpr uint8_t kGifFrameRate = 0x1FU;
-constexpr uint8_t kUiFrameRate = 0x0FU;
 constexpr uint8_t kRgb444ColMod = 0x03U;
 constexpr uint8_t kRgb565ColMod = 0x05U;
 
@@ -77,9 +64,9 @@ bool g_suppress_opaque_output;
 bool g_frame_forced_present;
 bool g_fast_panel_mode;
 bool g_fast_path_allowed;
-bool g_fast_mode_just_entered;
-uint32_t g_render_now_ms;
-uint32_t g_panel_epoch_ms;
+bool g_rgb444_stream_active;
+bool g_rgb444_frame_sequential;
+int g_rgb444_last_input_y;
 int g_source_width;
 int g_source_height;
 int g_content_width;
@@ -95,7 +82,7 @@ uint8_t g_mask[kDisplayWidth];
  * LCD stripe. Cache source bytes, not decoded colors: palettes, transparency
  * and source resolution remain unchanged. Never read past the uploaded GIF.
  */
-uint8_t g_read_cache[1024];
+uint8_t g_read_cache[2048];
 int32_t g_cache_start;
 int32_t g_cache_size;
 
@@ -112,7 +99,7 @@ lv_color_t g_stripe[kDisplayWidth * kStripeRows];
 int g_stripe_start_y = -1;
 int g_stripe_rows = 0;
 
-uint8_t g_rgb444_stripe[kRgb444BytesPerRow * kStripeRows];
+uint8_t g_rgb444_stripe[kRgb444BytesPerRow * kRgb444StripeRows];
 int g_rgb444_start_y = -1;
 int g_rgb444_rows = 0;
 
@@ -172,6 +159,31 @@ bool panel_command(
     data_set.count = 1U;
 
     /* logical 0 drives D/C high (pixel/parameter data). */
+    return gpio_pin_set_dt(&g_panel_dc, 0) == 0 &&
+           spi_write_dt(&g_panel_spi, &data_set) == 0;
+}
+
+bool panel_data(
+    const uint8_t *data,
+    size_t length) {
+
+    if (!data ||
+        length == 0U ||
+        !spi_is_ready_dt(&g_panel_spi) ||
+        !gpio_is_ready_dt(&g_panel_dc)) {
+        return false;
+    }
+
+    struct spi_buf data_buffer = {};
+    data_buffer.buf =
+        const_cast<uint8_t *>(data);
+    data_buffer.len = length;
+
+    struct spi_buf_set data_set = {};
+    data_set.buffers = &data_buffer;
+    data_set.count = 1U;
+
+    /* logical 0 drives D/C high for pixel data. */
     return gpio_pin_set_dt(&g_panel_dc, 0) == 0 &&
            spi_write_dt(&g_panel_spi, &data_set) == 0;
 }
@@ -418,25 +430,59 @@ void flush_rgb444_stripe() {
     }
 
 #if defined(CONFIG_SPI)
+    bool ok = false;
+
     if (g_fast_panel_mode &&
-        panel_set_window(
-            0U,
-            static_cast<uint16_t>(g_rgb444_start_y),
-            kDisplayWidth,
-            static_cast<uint16_t>(g_rgb444_rows))) {
+        g_rgb444_frame_sequential) {
 
-        size_t bytes =
-            kRgb444BytesPerRow *
-            static_cast<size_t>(g_rgb444_rows);
+        if (!g_rgb444_stream_active) {
+            /*
+             * Program the full remaining frame once, then keep feeding pixel
+             * data. ST7789 GRAM continues across CS toggles, so subsequent
+             * stripes avoid CASET/RASET/RAMWR command overhead.
+             */
+            ok =
+                panel_set_window(
+                    0U,
+                    static_cast<uint16_t>(g_rgb444_start_y),
+                    kDisplayWidth,
+                    static_cast<uint16_t>(
+                        kDisplayHeight -
+                        g_rgb444_start_y)) &&
+                panel_command(
+                    kCmdRamWr,
+                    nullptr,
+                    0U);
 
-        if (!panel_command(
+            g_rgb444_stream_active = ok;
+        } else {
+            ok = true;
+        }
+
+        if (ok) {
+            ok = panel_data(
+                g_rgb444_stripe,
+                kRgb444BytesPerRow *
+                    static_cast<size_t>(g_rgb444_rows));
+        }
+    } else if (g_fast_panel_mode) {
+        ok =
+            panel_set_window(
+                0U,
+                static_cast<uint16_t>(g_rgb444_start_y),
+                kDisplayWidth,
+                static_cast<uint16_t>(g_rgb444_rows)) &&
+            panel_command(
                 kCmdRamWr,
                 g_rgb444_stripe,
-                bytes)) {
-            lumi_diag_report(
-                'E',
-                "Raw GIF RGB444 SPI write failed");
-        }
+                kRgb444BytesPerRow *
+                    static_cast<size_t>(g_rgb444_rows));
+    }
+
+    if (g_fast_panel_mode && !ok) {
+        lumi_diag_report(
+            'E',
+            "Raw GIF RGB444 SPI write failed");
     }
 #endif
 
@@ -453,28 +499,19 @@ void leave_fast_panel_mode() {
 
 #if defined(CONFIG_SPI)
     /*
-     * Hide the pixel-format transition. The ST7789 retains GRAM contents
-     * while DISP_OFF is active.
+     * Pixel format changes are hidden once when leaving the screensaver.
+     * The LCD refresh rate/porches are never modified by GIF playback.
      */
     (void)display_blanking_on(g_display);
-
     (void)panel_command(
         kCmdColMod,
         &kRgb565ColMod,
         1U);
-    (void)panel_command(
-        kCmdPorCtrl,
-        kUiPorch,
-        sizeof(kUiPorch));
-    (void)panel_command(
-        kCmdFrCtrl2,
-        &kUiFrameRate,
-        1U);
-
     (void)display_blanking_off(g_display);
 #endif
 
     g_fast_panel_mode = false;
+    g_rgb444_stream_active = false;
 }
 
 bool enter_fast_panel_mode() {
@@ -490,22 +527,17 @@ bool enter_fast_panel_mode() {
     flush_stripe();
 
 #if defined(CONFIG_SPI)
+    /*
+     * Keep the ST7789 at its normal refresh timing. v1.14.40 attempted to
+     * retime the panel itself and made the visible top-to-bottom transition
+     * much slower on the real 1.47-inch module.
+     */
     (void)display_blanking_on(g_display);
-
     bool ok =
-        panel_command(
-            kCmdPorCtrl,
-            kGifPorch,
-            sizeof(kGifPorch)) &&
-        panel_command(
-            kCmdFrCtrl2,
-            &kGifFrameRate,
-            1U) &&
         panel_command(
             kCmdColMod,
             &kRgb444ColMod,
             1U);
-
     (void)display_blanking_off(g_display);
 
     if (!ok) {
@@ -514,18 +546,7 @@ bool enter_fast_panel_mode() {
     }
 
     g_fast_panel_mode = true;
-    g_fast_mode_just_entered = true;
-    g_panel_epoch_ms = g_render_now_ms;
-    g_next_present_at =
-        g_panel_epoch_ms +
-        kPanelLeadMs;
-
-    /*
-     * Give the freshly restarted scan a small head start. RGB444 transfers
-     * are ~20.6 ms at 32 MHz, leaving enough room inside the ~40 ms panel
-     * frame for the writer to remain behind the visible scan.
-     */
-    k_sleep(K_MSEC(kPanelLeadMs));
+    g_rgb444_stream_active = false;
     return true;
 #else
     return false;
@@ -545,6 +566,15 @@ void append_rgb444_row(
         return;
     }
 
+    if (g_rgb444_last_input_y >= 0 &&
+        y != g_rgb444_last_input_y + 1) {
+        g_rgb444_frame_sequential = false;
+        flush_rgb444_stripe();
+        g_rgb444_stream_active = false;
+    }
+
+    g_rgb444_last_input_y = y;
+
     if (g_rgb444_rows <= 0) {
         g_rgb444_start_y = y;
     }
@@ -554,7 +584,7 @@ void append_rgb444_row(
         g_rgb444_rows;
 
     if (y != expected_y ||
-        g_rgb444_rows >= kStripeRows) {
+        g_rgb444_rows >= kRgb444StripeRows) {
         flush_rgb444_stripe();
         g_rgb444_start_y = y;
     }
@@ -615,7 +645,7 @@ void append_rgb444_row(
 
     g_rgb444_rows++;
 
-    if (g_rgb444_rows >= kStripeRows) {
+    if (g_rgb444_rows >= kRgb444StripeRows) {
         flush_rgb444_stripe();
     }
 }
@@ -1062,8 +1092,9 @@ extern "C" void lumi_raw_gif_reset_playback(void) {
     g_next_present_at = 0U;
     g_suppress_opaque_output = false;
     g_frame_forced_present = false;
-    g_fast_mode_just_entered = false;
-    g_panel_epoch_ms = 0U;
+    g_rgb444_stream_active = false;
+    g_rgb444_frame_sequential = true;
+    g_rgb444_last_input_y = -1;
 }
 
 extern "C" void lumi_raw_gif_stop(void) {
@@ -1079,6 +1110,7 @@ extern "C" void lumi_raw_gif_stop(void) {
 
     g_opened = false;
     g_started = false;
+    g_rgb444_stream_active = false;
 }
 
 extern "C" bool lumi_raw_gif_render_due(
@@ -1106,8 +1138,9 @@ extern "C" bool lumi_raw_gif_render_due(
 
     int delay_ms = 0;
 
-    g_render_now_ms = now_ms;
-    g_fast_mode_just_entered = false;
+    g_rgb444_stream_active = false;
+    g_rgb444_frame_sequential = true;
+    g_rgb444_last_input_y = -1;
     g_suppress_opaque_output =
         (int32_t)(now_ms - g_next_present_at) < 0;
     g_frame_forced_present = false;
@@ -1136,25 +1169,9 @@ extern "C" bool lumi_raw_gif_render_due(
 
     if (!g_suppress_opaque_output ||
         g_frame_forced_present) {
-
-        if (g_fast_panel_mode) {
-            uint32_t reference =
-                now_ms +
-                (g_fast_mode_just_entered
-                    ? kPanelLeadMs
-                    : 0U);
-
-            while ((int32_t)(
-                       reference -
-                       g_next_present_at) >= 0) {
-                g_next_present_at +=
-                    kPresentIntervalMs;
-            }
-        } else {
-            g_next_present_at =
-                now_ms +
-                kPresentIntervalMs;
-        }
+        g_next_present_at =
+            now_ms +
+            kPresentIntervalMs;
     }
 
     delay_ms =
@@ -1169,11 +1186,6 @@ extern "C" bool lumi_raw_gif_render_due(
      */
     g_next_frame_at +=
         static_cast<uint32_t>(delay_ms);
-
-    if (g_fast_mode_just_entered) {
-        g_next_frame_at +=
-            kPanelLeadMs;
-    }
 
     if ((int32_t)(now_ms - g_next_frame_at) >= 0) {
         g_next_frame_at = now_ms;

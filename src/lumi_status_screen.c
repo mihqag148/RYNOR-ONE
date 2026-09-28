@@ -61,10 +61,17 @@ static lv_obj_t *saver_orb2;
 static lv_obj_t *saver_glass;
 static lv_obj_t *saver_title;
 
-#define SAVER_STRIPE_SRC_ROWS 16U
+/*
+ * Legacy RGB332/RYQ1 compatibility no longer needs a 32-row / ~20 KiB
+ * staging buffer now that normal RYNOR GIF uploads use the RAW GIF decoder.
+ * Four source rows keep the legacy path functional while recovering ~15 KiB
+ * of static RAM for USB/BLE and native GIF playback.
+ */
+#define SAVER_STRIPE_SRC_ROWS 4U
 #define SAVER_STRIPE_DST_ROWS (SAVER_STRIPE_SRC_ROWS * 2U)
 #define SAVER_MIN_FRAME_MS 40U /* legacy RGB332 path: 25 FPS max */
-#define SAVER_PACKED_MIN_FRAME_MS 10U /* GIF source timing granularity */
+#define SAVER_PACKED_MIN_FRAME_MS 10U
+#define SAVER_RAW_GIF_TIMER_MS 5U /* smoother 30 FPS scheduling granularity */
 #define SAVER_PACKED_MAX_FPS 100U
 
 static const struct device *const saver_display =
@@ -2801,10 +2808,11 @@ static void refresh_screensaver(lv_timer_t *timer) {
         if (screensaver_lv_timer) {
             lv_timer_set_period(
                 screensaver_lv_timer,
-                (saver_media_format == SAVER_FORMAT_RAW_GIF ||
-                 saver_media_format == SAVER_FORMAT_RYQ1)
-                    ? SAVER_PACKED_MIN_FRAME_MS
-                    : SAVER_MIN_FRAME_MS);
+                saver_media_format == SAVER_FORMAT_RAW_GIF
+                    ? SAVER_RAW_GIF_TIMER_MS
+                    : (saver_media_format == SAVER_FORMAT_RYQ1
+                        ? SAVER_PACKED_MIN_FRAME_MS
+                        : SAVER_MIN_FRAME_MS));
         }
 
         /* The GIF path writes directly to the ST7789. While it is active,
