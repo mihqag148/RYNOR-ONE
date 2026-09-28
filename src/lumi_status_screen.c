@@ -89,6 +89,7 @@ static lv_color_t saver_stripe_buf[320U * SAVER_STRIPE_DST_ROWS];
 #define SAVER_PACKED_MODE_P16 2U
 #define SAVER_PACKED_FLAGS 0x03U
 #define SAVER_PACKED_FLAGS_P16 0x10U
+#define SAVER_PACKED_FLAGS_P16_DELTA 0x20U
 #define SAVER_PACKED_HEADER_BYTES 26U
 #define SAVER_P16_PALETTE_COUNT 16U
 #define SAVER_P16_ROWS 4U
@@ -1789,7 +1790,14 @@ static bool saver_packed_load_header(
         header[2] == 'Q' &&
         header[3] == '2';
 
-    if (!is_ryq1 && !is_ryq2) {
+    bool is_ryq3 =
+        rc == 0 &&
+        header[0] == 'R' &&
+        header[1] == 'Y' &&
+        header[2] == 'Q' &&
+        header[3] == '3';
+
+    if (!is_ryq1 && !is_ryq2 && !is_ryq3) {
         return false;
     }
 
@@ -1841,8 +1849,16 @@ static bool saver_packed_load_header(
         storage_height == 172U &&
         palette_count == SAVER_P16_PALETTE_COUNT;
 
+    bool ryq3_ok =
+        is_ryq3 &&
+        color_mode == SAVER_PACKED_MODE_P16 &&
+        flags == SAVER_PACKED_FLAGS_P16_DELTA &&
+        storage_width == 320U &&
+        storage_height == 172U &&
+        palette_count == SAVER_P16_PALETTE_COUNT;
+
     if (!common_ok ||
-        (!ryq1_ok && !ryq2_ok)) {
+        (!ryq1_ok && !ryq2_ok && !ryq3_ok)) {
         return false;
     }
 
@@ -1858,7 +1874,10 @@ static bool saver_packed_load_header(
         saver_packed_next_frame_at = 0U;
         saver_packed_frame_index = 0U;
         saver_packed_color_mode = color_mode;
-        saver_packed_codec = is_ryq2 ? 2U : 1U;
+        saver_packed_codec =
+            is_ryq3
+                ? 3U
+                : (is_ryq2 ? 2U : 1U);
         saver_p16_fill_index = 0U;
         saver_packed_header_ready = true;
         saver_packed_playback_started = false;
@@ -2902,6 +2921,157 @@ static bool saver_p16_decode_frame(void) {
     return ok;
 }
 
+static bool saver_p16_decode_delta_frame(void) {
+    uint16_t palette[16];
+
+    for (uint8_t i = 0U; i < 16U; i++) {
+        if (!saver_packed_read_u16(
+                &palette[i])) {
+            return false;
+        }
+    }
+
+    saver_p16_build_pair_lut(palette);
+
+    uint16_t rect_count = 0U;
+    if (!saver_packed_read_u16(
+            &rect_count) ||
+        rect_count > 1024U) {
+        return false;
+    }
+
+    if (rect_count == 0U) {
+        return true;
+    }
+
+    bool ok = true;
+    saver_p16_fill_index = 0U;
+    bool panel_rgb444_active = false;
+
+    for (uint16_t rect = 0U;
+         rect < rect_count;
+         rect++) {
+
+        uint16_t y = 0U;
+        uint16_t x = 0U;
+        uint16_t width = 0U;
+        uint16_t height = 0U;
+
+        if (!saver_packed_read_u16(&y) ||
+            !saver_packed_read_u16(&x) ||
+            !saver_packed_read_u16(&width) ||
+            !saver_packed_read_u16(&height)) {
+            ok = false;
+            break;
+        }
+
+        if (width == 0U ||
+            height == 0U ||
+            (x & 1U) != 0U ||
+            (width & 1U) != 0U ||
+            x >= 320U ||
+            y >= 172U ||
+            (uint32_t)x + width > 320U ||
+            (uint32_t)y + height > 172U ||
+            height > SAVER_P16_ROWS) {
+            lumi_diag_report(
+                'E',
+                "RYQ3 bad rect f=%u r=%u x=%u y=%u w=%u h=%u",
+                (unsigned int)saver_packed_frame_index,
+                (unsigned int)rect,
+                (unsigned int)x,
+                (unsigned int)y,
+                (unsigned int)width,
+                (unsigned int)height);
+            ok = false;
+            break;
+        }
+
+        size_t packed_bytes =
+            ((size_t)width *
+             (size_t)height) /
+            2U;
+
+        if (packed_bytes >
+            sizeof(saver_p16_indices) ||
+            !saver_packed_read_bytes(
+                saver_p16_indices,
+                packed_bytes)) {
+            ok = false;
+            break;
+        }
+
+        uint8_t *output =
+            saver_p16_rgb444[
+                saver_p16_fill_index];
+
+        size_t out = 0U;
+
+        for (size_t i = 0U;
+             i < packed_bytes;
+             i++) {
+            const uint8_t *rgb =
+                saver_p16_pair_lut[
+                    saver_p16_indices[i]];
+
+            output[out++] = rgb[0];
+            output[out++] = rgb[1];
+            output[out++] = rgb[2];
+        }
+
+        int rc =
+            lumi_panel_rgb444_begin_rect(
+                x,
+                y,
+                width,
+                height);
+
+        if (rc != 0) {
+            lumi_diag_report(
+                'E',
+                "RYQ3 RGB444 rect begin rc=%d r=%u",
+                rc,
+                (unsigned int)rect);
+            ok = false;
+            break;
+        }
+
+        panel_rgb444_active = true;
+
+        rc =
+            lumi_panel_rgb444_write_async(
+                output,
+                out);
+
+        if (rc != 0) {
+            lumi_diag_report(
+                'E',
+                "RYQ3 RGB444 rect write rc=%d r=%u",
+                rc,
+                (unsigned int)rect);
+            ok = false;
+            break;
+        }
+
+        saver_p16_fill_index ^= 1U;
+    }
+
+    if (panel_rgb444_active) {
+        int end_rc =
+            lumi_panel_rgb444_end_frame();
+
+        if (end_rc != 0) {
+            lumi_diag_report(
+                'E',
+                "RYQ3 RGB444 end rc=%d",
+                end_rc);
+            ok = false;
+        }
+    }
+
+    return ok;
+}
+
 static bool saver_packed_decode_next_frame(uint32_t now_ms) {
     if (saver_media_format != SAVER_FORMAT_RYQ1 ||
         !saver_packed_header_ready ||
@@ -2925,6 +3095,23 @@ static bool saver_packed_decode_next_frame(uint32_t now_ms) {
 
     if (!saver_packed_read_u16(&duration_ms)) {
         return false;
+    }
+
+    if (saver_packed_codec == 3U) {
+        if (!saver_p16_decode_delta_frame()) {
+            lumi_diag_report(
+                'E',
+                "RYQ3 decode failed frame=%u",
+                (unsigned int)saver_packed_frame_index);
+            saver_packed_playback_started = false;
+            return false;
+        }
+
+        saver_packed_frame_index++;
+        saver_packed_next_frame_at =
+            now_ms +
+            MAX((uint32_t)duration_ms, 1U);
+        return true;
     }
 
     if (saver_packed_codec == 2U) {
@@ -3081,7 +3268,7 @@ static void draw_custom_saver_frame(
 }
 
 static void refresh_screensaver(lv_timer_t *timer) {
-    /* RYQ1/RYQ2 store per-frame delays. Poll packed playback at 10 ms
+    /* RYQ1/RYQ2/RYQ3 store per-frame delays. Poll packed playback at 10 ms
      * granularity; keep the older RGB332 path at 40 ms.
      */
     lv_timer_set_period(
