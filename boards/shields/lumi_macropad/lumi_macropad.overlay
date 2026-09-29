@@ -183,15 +183,23 @@
         };
     };
 
-    lumi_rgb_spi_default: lumi_rgb_spi_default {
+    /* WS2812 transport uses the dedicated nRF I2S peripheral instead of
+     * consuming another SPIM instance. Only SDOUT (P0.06 / D1) is wired to
+     * the LED chain; SCK/LRCK are routed to otherwise-unused GPIOs.
+     */
+    lumi_rgb_i2s_default: lumi_rgb_i2s_default {
         group1 {
-            psels = <NRF_PSEL(SPIM_MOSI, 0, 6)>;
+            psels = <NRF_PSEL(I2S_SCK_M, 0, 4)>,
+                    <NRF_PSEL(I2S_LRCK_M, 0, 5)>,
+                    <NRF_PSEL(I2S_SDOUT, 0, 6)>;
         };
     };
 
-    lumi_rgb_spi_sleep: lumi_rgb_spi_sleep {
+    lumi_rgb_i2s_sleep: lumi_rgb_i2s_sleep {
         group1 {
-            psels = <NRF_PSEL(SPIM_MOSI, 0, 6)>;
+            psels = <NRF_PSEL(I2S_SCK_M, 0, 4)>,
+                    <NRF_PSEL(I2S_LRCK_M, 0, 5)>,
+                    <NRF_PSEL(I2S_SDOUT, 0, 6)>;
             low-power-enable;
         };
     };
@@ -321,24 +329,24 @@
     };
 };
 
-// Six WS2812B LEDs on P0.06. The SPI peripheral only generates the
-// WS2812 data waveform; there is no separate SCK wire to the LEDs.
-// WS2812 needs only 4 MHz. Keep it on SPIM0 so the TFT can own SPIM3
-// without relying on the SPIM1 path that regressed the strip after v1.14.39.
-&spi0 {
-    compatible = "nordic,nrf-spim";
+// Six WS2812B LEDs on P0.06 / D1.
+// Use nRF52840 I2S to generate the 800 kHz waveform. This keeps RGB fully
+// independent of TFT SPIM3 and external-flash SPIM2, and avoids the SPIM1/0
+// regression that left the physical strip latched white.
+&i2s0 {
     status = "okay";
-    pinctrl-0 = <&lumi_rgb_spi_default>;
-    pinctrl-1 = <&lumi_rgb_spi_sleep>;
+    pinctrl-0 = <&lumi_rgb_i2s_default>;
+    pinctrl-1 = <&lumi_rgb_i2s_sleep>;
     pinctrl-names = "default", "sleep";
+};
 
-    led_strip: ws2812@0 {
-        compatible = "worldsemi,ws2812-spi";
-        reg = <0>;
-        spi-max-frequency = <4000000>;
+/ {
+    led_strip: ws2812 {
+        compatible = "worldsemi,ws2812-i2s";
+        status = "okay";
+        i2s-dev = <&i2s0>;
         chain-length = <6>;
-        spi-one-frame = <0x70>;
-        spi-zero-frame = <0x40>;
+        reset-delay = <50>;
         color-mapping = <LED_COLOR_ID_GREEN
                          LED_COLOR_ID_RED
                          LED_COLOR_ID_BLUE>;
