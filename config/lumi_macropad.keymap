@@ -16,6 +16,19 @@
             #binding-cells = <1>;
             display-name = "Lumi Action";
         };
+
+        /* Hard recovery for stale/corrupt host bonds:
+         * clear every keyboard-side BLE bond, select host slot 0, then prefer BLE.
+         */
+        ble_recovery: ble_recovery {
+            compatible = "zmk,behavior-macro";
+            #binding-cells = <0>;
+            wait-ms = <40>;
+            tap-ms = <40>;
+            bindings = <&bt BT_CLR_ALL>,
+                       <&bt BT_SEL 0>,
+                       <&out OUT_BLE>;
+        };
     };
 
     // Hold physical key 1 + key 12 together to unlock ZMK Studio.
@@ -26,6 +39,15 @@
             timeout-ms = <80>;
             key-positions = <0 11>;
             bindings = <&studio_unlock>;
+        };
+
+        /* Hold K2 + K3 + K10 + K11 together to recover Bluetooth from any
+         * profile, including when the PC-side pairing list has already been wiped.
+         */
+        ble_recovery_combo {
+            timeout-ms = <150>;
+            key-positions = <1 2 9 10>;
+            bindings = <&ble_recovery>;
         };
     };
 
@@ -137,7 +159,7 @@
             display-name = "CONNECTION";
             bindings = <
                 &out OUT_BLE  &bt BT_SEL 0  &bt BT_SEL 1  &bt BT_SEL 2
-                &out OUT_USB  &bt BT_CLR     &bt BT_CLR_ALL &bt BT_NXT
+                &out OUT_USB  &bt BT_CLR     &ble_recovery  &bt BT_NXT
                 &bt BT_PRV    &none          &none          &none
                 &to 0
             >;
